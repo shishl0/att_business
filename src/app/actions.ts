@@ -66,14 +66,22 @@ export async function markAttendance(employeeId: string, type: 'check_in' | 'che
   // Try to get IP from headers
   const headersList = await headers()
   const forwardedFor = headersList.get('x-forwarded-for')
-  const ipAddress = forwardedFor ? forwardedFor.split(',')[0] : 'unknown'
+  const ipAddress = forwardedFor ? forwardedFor.split(',')[0].trim() : 'unknown'
+  const realIp = headersList.get('x-real-ip')
+  const finalIp = ipAddress !== 'unknown' ? ipAddress : (realIp || 'unknown')
+
+  const allowedIp = process.env.NEXT_PUBLIC_ALLOWED_IP || '5.76.128.48'
+
+  if (process.env.NODE_ENV !== 'development' && finalIp !== allowedIp) {
+    return { success: false, error: `Доступ запрещен. Ваш IP: ${finalIp}. Требуется сеть Doner Centr 5G.` }
+  }
 
   const { error } = await supabase
     .from('attendance_logs')
     .insert({
       employee_id: employeeId,
       type,
-      ip_address: ipAddress
+      ip_address: finalIp
     })
 
   if (error) {
