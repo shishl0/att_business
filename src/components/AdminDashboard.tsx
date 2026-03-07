@@ -220,6 +220,7 @@ export default function AdminDashboard({
 
   // Schedule drag-n-drop state
   const [draggedEmp, setDraggedEmp] = useState<Employee | null>(null)
+  const [selectedEmpId, setSelectedEmpId] = useState<string | null>(null)
 
   const shifts = useMemo(() => computeShifts(logs), [logs])
 
@@ -341,25 +342,27 @@ export default function AdminDashboard({
     e.dataTransfer.effectAllowed = 'copy'
   }
 
-  const handleDropToDay = async (e: DragEvent, dayIndex: number) => {
-    e.preventDefault()
-    if (!draggedEmp) return
+  const handleDropToDay = async (e: DragEvent | null, dayIndex: number, empOverride?: Employee) => {
+    if (e) e.preventDefault()
+    const emp = empOverride || draggedEmp
+    if (!emp) return
 
     // Prevent Duplicates
-    const alreadyExists = schedules.some(s => s.employee_id === draggedEmp.id && s.day_of_week === dayIndex + 1)
+    const alreadyExists = schedules.some(s => s.employee_id === emp.id && s.day_of_week === dayIndex + 1)
     if (alreadyExists) {
-      toast.error(`${draggedEmp.name} уже назначен(а) на ${WEEKDAYS[dayIndex]}`)
+      toast.error(`${emp.name} уже назначен(а) на ${WEEKDAYS[dayIndex]}`)
       return
     }
 
-    const start = prompt(`Укажите время начала (HH:MM) для ${draggedEmp.name}:`, "09:00")
+    const start = prompt(`Укажите время начала (HH:MM) для ${emp.name}:`, "09:00")
     if (!start) return
-    const end = prompt(`Укажите время окончания (HH:MM) для ${draggedEmp.name}:`, "22:00")
+    const end = prompt(`Укажите время окончания (HH:MM) для ${emp.name}:`, "22:00")
     if (!end) return
 
-    const res = await addSchedule(draggedEmp.id, dayIndex + 1, start, end)
+    const res = await addSchedule(emp.id, dayIndex + 1, start, end)
     if (res.success) {
-      toast.success(`В расписание добавлен(а) ${draggedEmp.name}`)
+      toast.success(`В расписание добавлен(а) ${emp.name}`)
+      setSelectedEmpId(null)
       manualRefresh()
     } else {
       toast.error('Ошибка добавления: ' + res.error)
@@ -433,26 +436,26 @@ export default function AdminDashboard({
 
     return (
       <div className="space-y-4">
-        <div className="flex justify-between items-center bg-gray-50 p-4 rounded-xl border border-gray-200">
-          <Button variant="outline" onClick={() => setCurrentDate(new Date(year, month - 1, 1))}>
+        <div className="flex flex-col sm:flex-row justify-between items-center bg-gray-50 p-4 rounded-xl border border-gray-200 gap-4">
+          <Button variant="outline" onClick={() => setCurrentDate(new Date(year, month - 1, 1))} className="w-full sm:w-auto">
             Пред. месяц
           </Button>
-          <h3 className="font-extrabold text-xl text-gray-800 capitalize">
+          <h3 className="font-extrabold text-lg md:text-xl text-gray-800 capitalize text-center">
             {currentDate.toLocaleString('ru-RU', { month: 'long', year: 'numeric' })}
           </h3>
-          <Button variant="outline" onClick={() => setCurrentDate(new Date(year, month + 1, 1))}>
+          <Button variant="outline" onClick={() => setCurrentDate(new Date(year, month + 1, 1))} className="w-full sm:w-auto">
             След. месяц
           </Button>
         </div>
 
-        <div className="grid grid-cols-7 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
           {WEEKDAYS.map(day => (
-            <div key={day} className="text-center font-bold text-gray-500 text-sm py-2">
+            <div key={day} className="hidden lg:block text-center font-bold text-gray-500 text-sm py-2">
               {day}
             </div>
           ))}
           {calendarDays.map((day, i) => (
-            <div key={i}>
+            <div key={i} className={day === 0 ? "hidden lg:block" : ""}>
               {renderCalendarCell(year, month, day)}
             </div>
           ))}
@@ -470,43 +473,45 @@ export default function AdminDashboard({
           <div>
             <h1 className="text-2xl font-bold text-gray-900 tracking-tight">Панель Управления</h1>
           </div>
-          <div className="flex flex-wrap bg-gray-100/80 p-1.5 rounded-xl w-full xl:w-auto shadow-inner gap-1">
-            <Button
-              variant={activeTab === 'employees' ? 'default' : 'ghost'}
-              onClick={() => setActiveTab('employees')}
-              className={`flex-1 md:flex-none gap-2 px-6 shadow-none transition-all ${activeTab === 'employees' ? 'bg-white text-blue-700 shadow-sm' : 'text-gray-500 hover:text-gray-900 bg-transparent'
-                }`}
-            >
-              <Users className="w-4 h-4" />
-              Сотрудники
-            </Button>
-            <Button
-              variant={activeTab === 'schedule' ? 'default' : 'ghost'}
-              onClick={() => setActiveTab('schedule')}
-              className={`flex-1 md:flex-none gap-2 px-6 shadow-none transition-all ${activeTab === 'schedule' ? 'bg-white text-blue-700 shadow-sm' : 'text-gray-500 hover:text-gray-900 bg-transparent'
-                }`}
-            >
-              <CalendarIcon className="w-4 h-4" />
-              Расписание (План)
-            </Button>
-            <Button
-              variant={activeTab === 'calendar' ? 'default' : 'ghost'}
-              onClick={() => setActiveTab('calendar')}
-              className={`flex-1 md:flex-none gap-2 px-6 shadow-none transition-all ${activeTab === 'calendar' ? 'bg-white text-blue-700 shadow-sm' : 'text-gray-500 hover:text-gray-900 bg-transparent'
-                }`}
-            >
-              <CalendarCheck className="w-4 h-4" />
-              Календарь (Факт)
-            </Button>
-            <Button
-              variant={activeTab === 'logs' ? 'default' : 'ghost'}
-              onClick={() => setActiveTab('logs')}
-              className={`flex-1 md:flex-none gap-2 px-6 shadow-none transition-all ${activeTab === 'logs' ? 'bg-white text-blue-700 shadow-sm' : 'text-gray-500 hover:text-gray-900 bg-transparent'
-                }`}
-            >
-              <Clock className="w-4 h-4" />
-              Логи
-            </Button>
+          <div className="flex overflow-x-auto pb-2 xl:pb-0 no-scrollbar xl:bg-transparent -mx-6 px-6 xl:mx-0 xl:px-0 w-[calc(100%+3rem)] xl:w-auto">
+            <div className="flex bg-gray-100/80 p-1.5 rounded-xl shadow-inner gap-1 whitespace-nowrap">
+              <Button
+                variant={activeTab === 'employees' ? 'default' : 'ghost'}
+                onClick={() => setActiveTab('employees')}
+                className={`flex-none gap-2 px-4 md:px-6 shadow-none transition-all ${activeTab === 'employees' ? 'bg-white text-blue-700 shadow-sm' : 'text-gray-500 hover:text-gray-900 bg-transparent'
+                  }`}
+              >
+                <Users className="w-4 h-4" />
+                Сотрудники
+              </Button>
+              <Button
+                variant={activeTab === 'schedule' ? 'default' : 'ghost'}
+                onClick={() => setActiveTab('schedule')}
+                className={`flex-none gap-2 px-4 md:px-6 shadow-none transition-all ${activeTab === 'schedule' ? 'bg-white text-blue-700 shadow-sm' : 'text-gray-500 hover:text-gray-900 bg-transparent'
+                  }`}
+              >
+                <CalendarIcon className="w-4 h-4" />
+                Расписание
+              </Button>
+              <Button
+                variant={activeTab === 'calendar' ? 'default' : 'ghost'}
+                onClick={() => setActiveTab('calendar')}
+                className={`flex-none gap-2 px-4 md:px-6 shadow-none transition-all ${activeTab === 'calendar' ? 'bg-white text-blue-700 shadow-sm' : 'text-gray-500 hover:text-gray-900 bg-transparent'
+                  }`}
+              >
+                <CalendarCheck className="w-4 h-4" />
+                Календарь
+              </Button>
+              <Button
+                variant={activeTab === 'logs' ? 'default' : 'ghost'}
+                onClick={() => setActiveTab('logs')}
+                className={`flex-none gap-2 px-4 md:px-6 shadow-none transition-all ${activeTab === 'logs' ? 'bg-white text-blue-700 shadow-sm' : 'text-gray-500 hover:text-gray-900 bg-transparent'
+                  }`}
+              >
+                <Clock className="w-4 h-4" />
+                Логи
+              </Button>
+            </div>
           </div>
         </div>
 
@@ -608,19 +613,22 @@ export default function AdminDashboard({
                 </h3>
                 <div className="flex-1 overflow-y-auto space-y-3 pr-2">
                   <p className="text-xs text-gray-500 mb-2 leading-relaxed">
-                    Перетащите карточку сотрудника в колонку дня недели, чтобы назначить смену.
+                    На десктопе: перетащите карточку. <br />
+                    На мобильном: нажмите на сотрудника, затем на день.
                   </p>
                   {employees.filter(e => e.is_active).map(emp => (
                     <div
                       key={emp.id}
                       draggable
                       onDragStart={(e) => handleDragStart(e, emp)}
-                      className="bg-white border border-gray-200 rounded-lg p-3 shadow-sm cursor-grab active:cursor-grabbing hover:border-blue-400 hover:shadow-md transition-all flex items-center gap-3"
+                      onClick={() => setSelectedEmpId(selectedEmpId === emp.id ? null : emp.id)}
+                      className={`bg-white border rounded-lg p-3 shadow-sm cursor-pointer lg:cursor-grab active:lg:cursor-grabbing transition-all flex items-center gap-3 ${selectedEmpId === emp.id ? 'border-blue-600 ring-2 ring-blue-100 bg-blue-50' : 'border-gray-200 hover:border-blue-400'
+                        }`}
                     >
-                      <div className="w-8 h-8 rounded-full bg-blue-100 text-blue-800 flex items-center justify-center font-bold text-sm">
+                      <div className={`w-8 h-8 rounded-full flex items-center justify-center font-bold text-sm ${selectedEmpId === emp.id ? 'bg-blue-600 text-white' : 'bg-blue-100 text-blue-800'}`}>
                         {emp.name.charAt(0)}
                       </div>
-                      <span className="font-semibold text-gray-800 text-sm truncate">{emp.name}</span>
+                      <span className={`font-semibold text-sm truncate ${selectedEmpId === emp.id ? 'text-blue-900' : 'text-gray-800'}`}>{emp.name}</span>
                     </div>
                   ))}
                 </div>
@@ -633,10 +641,16 @@ export default function AdminDashboard({
                   return (
                     <div
                       key={day}
-                      className="bg-gray-50/50 border border-gray-200 rounded-xl flex flex-col overflow-hidden transition-colors data-[drop=true]:bg-blue-50 data-[drop=true]:border-blue-300"
-                      onDragOver={e => { e.preventDefault(); e.currentTarget.setAttribute('data-drop', 'true') }}
-                      onDragLeave={e => e.currentTarget.removeAttribute('data-drop')}
-                      onDrop={e => { e.currentTarget.removeAttribute('data-drop'); handleDropToDay(e, dIdx) }}
+                      className={`bg-gray-50/50 border border-gray-200 rounded-xl flex flex-col overflow-hidden transition-colors cursor-pointer lg:cursor-default ${selectedEmpId ? 'ring-2 ring-blue-300 border-blue-400 bg-blue-50/50' : ''}`}
+                      onDragOver={e => { e.preventDefault(); e.currentTarget.classList.add('bg-blue-100') }}
+                      onDragLeave={e => e.currentTarget.classList.remove('bg-blue-100')}
+                      onDrop={e => { e.currentTarget.classList.remove('bg-blue-100'); handleDropToDay(e, dIdx) }}
+                      onClick={() => {
+                        if (selectedEmpId) {
+                          const emp = employees.find(e => e.id === selectedEmpId)
+                          if (emp) handleDropToDay(null, dIdx, emp)
+                        }
+                      }}
                     >
                       <div className="bg-white border-b border-gray-200 p-3 text-center font-bold text-gray-700">
                         {day}
@@ -685,16 +699,16 @@ export default function AdminDashboard({
           {/* Logs Tab */}
           {activeTab === 'logs' && (
             <div className="space-y-6 animate-in fade-in zoom-in-95 duration-200">
-              <div className="flex justify-between items-center mb-6">
+              <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-6">
                 <h2 className="text-lg font-bold text-gray-900 px-1">Журнал событий (Факт)</h2>
-                <div className="flex gap-3">
-                  <Button onClick={manualRefresh} variant="outline" className="gap-2 text-sm px-4" disabled={isRefreshing}>
+                <div className="flex flex-wrap gap-2 w-full sm:w-auto">
+                  <Button onClick={manualRefresh} variant="outline" className="flex-1 sm:flex-none gap-2 text-sm h-10" disabled={isRefreshing}>
                     <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin' : ''}`} /> Обновить
                   </Button>
-                  <Button onClick={exportToExcel} variant="success" className="gap-2 text-sm px-4">
+                  <Button onClick={exportToExcel} variant="success" className="flex-1 sm:flex-none gap-2 text-sm h-10">
                     <Download className="w-4 h-4" /> Excel
                   </Button>
-                  <Button onClick={handleClearLogs} variant="destructive" className="gap-2 text-sm px-4">
+                  <Button onClick={handleClearLogs} variant="destructive" className="w-full sm:w-auto gap-2 text-sm h-10">
                     <Trash2 className="w-4 h-4" /> Очистить логи
                   </Button>
                 </div>
