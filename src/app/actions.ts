@@ -1,156 +1,129 @@
 'use server'
 
-import { supabase } from '@/lib/supabase'
-import { revalidatePath } from 'next/cache'
-import { headers } from 'next/headers'
+import { createClient } from '@supabase/supabase-js'
 
-export async function getEmployeeByDevice(fingerprint: string) {
-  const { data, error } = await supabase
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
+const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY!
+const allowedIp = process.env.NEXT_PUBLIC_ALLOWED_IP!
+
+const supabase = createClient(supabaseUrl, supabaseServiceKey, {
+  auth: {
+    persistSession: false
+  }
+})
+
+// === Employee actions ===
+
+export async function getEmployeeByDevice(deviceId: string) {
+  const { data } = await supabase
     .from('employees')
-    .select('*')
-    .eq('device_id', fingerprint)
+    .select('id, name')
+    .eq('device_id', deviceId)
     .eq('is_active', true)
     .single()
-  
-  if (error && error.code !== 'PGRST116') {
-    console.error('getEmployeeByDevice Error:', error)
-  }
   return data
 }
 
 export async function getUnlinkedEmployees() {
-  const { data, error } = await supabase
+  const { data } = await supabase
     .from('employees')
-    .select('*')
+    .select('id, name')
     .is('device_id', null)
     .eq('is_active', true)
-    
-  if (error) {
-    console.error('getUnlinkedEmployees Error:', error)
-    return []
-  }
+    .order('name')
   return data || []
 }
 
-export async function linkDevice(employeeId: string, fingerprint: string) {
-  const { error } = await supabase
-    .from('employees')
-    .update({ device_id: fingerprint })
-    .eq('id', employeeId)
-
-  if (error) {
-    return { success: false, error: error.message }
-  }
-  
-  revalidatePath('/')
-  return { success: true }
-}
-
 export async function getLastLogAction(employeeId: string) {
-  const { data, error } = await supabase
+  const { data } = await supabase
     .from('attendance_logs')
-    .select('type, timestamp')
+    .select('type')
     .eq('employee_id', employeeId)
     .order('timestamp', { ascending: false })
     .limit(1)
     .single()
-
-  if (error && error.code !== 'PGRST116') {
-    console.error('getLastLogAction Error:', error)
-  }
-
   return data
 }
 
-export async function markAttendance(employeeId: string, type: 'check_in' | 'check_out') {
-  // Try to get IP from headers
-  const headersList = await headers()
-  const forwardedFor = headersList.get('x-forwarded-for')
-  const ipAddress = forwardedFor ? forwardedFor.split(',')[0].trim() : 'unknown'
-  const realIp = headersList.get('x-real-ip')
-  const finalIp = ipAddress !== 'unknown' ? ipAddress : (realIp || 'unknown')
-
-  const allowedIp = process.env.NEXT_PUBLIC_ALLOWED_IP || '5.76.128.48'
-
-  if (process.env.NODE_ENV !== 'development' && finalIp !== allowedIp) {
-    return { success: false, error: `Доступ запрещен. Ваш IP: ${finalIp}. Требуется сеть Doner Centr 5G.` }
-  }
-
+export async function linkDevice(employeeId: string, deviceId: string) {
   const { error } = await supabase
-    .from('attendance_logs')
-    .insert({
-      employee_id: employeeId,
-      type,
-      ip_address: finalIp
-    })
+    .from('employees')
+    .update({ device_id: deviceId })
+    .eq('id', employeeId)
 
-  if (error) {
-    return { success: false, error: error.message }
-  }
-  
-  revalidatePath('/')
+  if (error) return { success: false, error: error.message }
   return { success: true }
 }
 
-// ---- Admin Actions ----
+import { headers } from 'next/headers'
+
+export async function markAttendance(
+  employeeId: string,
+  type: string
+) {
+  const headersList = await headers()
+  const rawIp = headersList.get('x-forwarded-for') || headersList.get('x-real-ip') || 'unknown'
+  
+  // Strip IPv6 prefix if present
+  let finalIp = rawIp.split(',')[0].trim()
+  if (finalIp.startsWith('::ffff:')) {
+    finalIp = finalIp.substring(7)
+  }
+
+  // IP check
+  if (finalIp !== allowedIp && allowedIp !== '*') {
+    return { success: false, error: `Доступ запрещен. Ваш IP: ${finalIp}. Пожалуйста, подключитесь к рабочей сети Wi-Fi ресторана (Doner Centr 5G).` }
+  }
+
+  const { data: emp } = await supabase
+    .from('employees')
+    .select('device_id, is_active')
+    .eq('id', employeeId)
+    .single()
+
+  if (!emp) return { success: false, error: 'Сотрудник не найден' }
+  if (emp.is_active === false) return { success: false, error: 'Сотрудник в архиве' }
+
+  const { error: insErr } = await supabase
+    .from('attendance_logs')
+    .insert([{ employee_id: employeeId, type, ip_address: finalIp }])
+
+  if (insErr) return { success: false, error: insErr.message }
+  return { success: true, type }
+}
+
+// === Admin actions ===
 
 export async function getEmployees() {
-  const { data, error } = await supabase
+  const { data } = await supabase
     .from('employees')
     .select('*')
-    .order('created_at', { ascending: false })
-
+    .order('name')
   return data || []
 }
 
 export async function getLogs() {
-  const { data, error } = await supabase
+  const { data } = await supabase
     .from('attendance_logs')
     .select('*, employees(name)')
     .order('timestamp', { ascending: false })
-    .limit(1000)
-
   return data || []
 }
 
 export async function addEmployee(name: string) {
   const { error } = await supabase
     .from('employees')
-    .insert({ name })
-
-  if (error) {
-    return { success: false, error: error.message }
-  }
-
-  revalidatePath('/admin')
+    .insert([{ name }])
+  if (error) return { success: false, error: error.message }
   return { success: true }
 }
 
-export async function resetDevice(employeeId: string) {
+export async function updateEmployee(id: string, name: string, is_active: boolean) {
   const { error } = await supabase
     .from('employees')
-    .update({ device_id: null })
-    .eq('id', employeeId)
-
-  if (error) {
-    return { success: false, error: error.message }
-  }
-
-  revalidatePath('/admin')
-  return { success: true }
-}
-
-export async function updateEmployee(id: string, name: string, isActive: boolean) {
-  const { error } = await supabase
-    .from('employees')
-    .update({ name, is_active: isActive })
+    .update({ name, is_active })
     .eq('id', id)
-
-  if (error) {
-    return { success: false, error: error.message }
-  }
-
-  revalidatePath('/admin')
+  if (error) return { success: false, error: error.message }
   return { success: true }
 }
 
@@ -159,11 +132,84 @@ export async function deleteEmployee(id: string) {
     .from('employees')
     .delete()
     .eq('id', id)
-
-  if (error) {
-    return { success: false, error: error.message }
-  }
-
-  revalidatePath('/admin')
+  if (error) return { success: false, error: error.message }
   return { success: true }
+}
+
+export async function resetDevice(id: string) {
+  const { error } = await supabase
+    .from('employees')
+    .update({ device_id: null })
+    .eq('id', id)
+  if (error) return { success: false, error: error.message }
+  return { success: true }
+}
+
+export async function forceCheckOutAdmin(employeeId: string) {
+  const { error } = await supabase
+    .from('attendance_logs')
+    .insert([{ 
+      employee_id: employeeId, 
+      type: 'check_out', 
+      ip_address: 'Администратор (Принудительно)' 
+    }])
+
+  if (error) return { success: false, error: error.message }
+  return { success: true }
+}
+
+export async function deleteAllLogs() {
+  const { error } = await supabase
+    .from('attendance_logs')
+    .delete()
+    .gt('id', 0) // Delete all records where ID > 0
+
+  if (error) return { success: false, error: error.message }
+  return { success: true }
+}
+
+// === Schedules CRUD === //
+
+export async function getSchedules() {
+  const { data } = await supabase
+    .from('schedules')
+    .select('*, employees(name)')
+    .order('day_of_week', { ascending: true })
+    .order('start_time', { ascending: true })
+  return data || []
+}
+
+export async function addSchedule(employeeId: string, dayOfWeek: number, startTime: string, endTime: string) {
+  const { error } = await supabase
+    .from('schedules')
+    .insert([{ employee_id: employeeId, day_of_week: dayOfWeek, start_time: startTime, end_time: endTime }])
+  if (error) return { success: false, error: error.message }
+  return { success: true }
+}
+
+export async function updateSchedule(id: string, startTime: string, endTime: string) {
+  const { error } = await supabase
+    .from('schedules')
+    .update({ start_time: startTime, end_time: endTime })
+    .eq('id', id)
+  if (error) return { success: false, error: error.message }
+  return { success: true }
+}
+
+export async function deleteSchedule(id: string) {
+  const { error } = await supabase
+    .from('schedules')
+    .delete()
+    .eq('id', id)
+  if (error) return { success: false, error: error.message }
+  return { success: true }
+}
+
+export async function getAdminDashboardData() {
+  const [employees, logs, schedules] = await Promise.all([
+    getEmployees(),
+    getLogs(),
+    getSchedules()
+  ])
+  return { success: true, employees, logs, schedules }
 }
