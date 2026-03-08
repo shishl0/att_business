@@ -4,10 +4,11 @@ import { useState, useMemo, DragEvent, useEffect } from 'react'
 import { useRouter, usePathname, useSearchParams } from 'next/navigation'
 import {
   addEmployee, resetDevice, updateEmployee, deleteEmployee, forceCheckOutAdmin,
-  deleteAllLogs, addSchedule, updateSchedule, deleteSchedule, getAdminDashboardData
+  deleteAllLogs, addSchedule, updateSchedule, deleteSchedule, getAdminDashboardData,
+  manualMarkAttendance, processShiftAccrual, withdrawSalary, updateSetting
 } from '@/app/actions'
 import * as XLSX from 'xlsx'
-import { Plus, Download, RefreshCw, SmartphoneNfc, Users, Clock, AlertTriangle, Edit2, Check, X, Trash2, CalendarCheck, ClockAlert, LogOut, Calendar as CalendarIcon, GripVertical } from 'lucide-react'
+import { Plus, Download, RefreshCw, SmartphoneNfc, Users, Clock, AlertTriangle, Edit2, Check, X, Trash2, CalendarCheck, ClockAlert, LogOut, Calendar as CalendarIcon, GripVertical, Wallet, Landmark, HandCoins, Settings } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import {
@@ -24,6 +25,7 @@ type Employee = {
   name: string
   device_id: string | null
   is_active: boolean
+  balance: number
   created_at: string
 }
 
@@ -42,7 +44,16 @@ type Schedule = {
   day_of_week: number
   start_time: string
   end_time: string
+  shift_salary: number
   employees: { name: string }
+}
+
+type Transaction = {
+  id: string
+  employee_id: string
+  amount: number
+  type: 'accrual' | 'withdrawal'
+  timestamp: string
 }
 
 type Shift = {
@@ -54,11 +65,12 @@ type Shift = {
   check_out_time: string | null
   duration_ms: number
   is_overtime: boolean
+  is_late: boolean
 }
 
-type TabKey = 'employees' | 'schedule' | 'calendar' | 'logs'
+type TabKey = 'employees' | 'schedule' | 'calendar' | 'logs' | 'finances' | 'settings'
 
-function createShift(inLog: Log | null, outLog: Log | null): Shift {
+function createShift(inLog: Log | null, outLog: Log | null, schedulesForDay: Schedule[] = []): Shift {
   const baseLog = inLog || outLog!
   const empId = baseLog.employee_id
   const empName = baseLog.employees?.name || 'Неизвестно'
@@ -76,6 +88,7 @@ function createShift(inLog: Log | null, outLog: Log | null): Shift {
 
   let duration_ms = 0
   let is_overtime = false
+  let is_late = false
 
   if (inTime && outTime) {
     duration_ms = outTime.getTime() - inTime.getTime()
@@ -91,6 +104,22 @@ function createShift(inLog: Log | null, outLog: Log | null): Shift {
     }
   }
 
+  if (inTime && schedulesForDay.length > 0) {
+    // Check if they were late based on the first schedule of that day
+    const firstSchedule = schedulesForDay.sort((a, b) => a.start_time.localeCompare(b.start_time))[0]
+    const [schedHour, schedMin] = firstSchedule.start_time.split(':').map(Number)
+
+    // Convert inTime to local for comparison (roughly)
+    const offsetMs = 5 * 60 * 60 * 1000
+    const localInTime = new Date(inTime.getTime() + offsetMs)
+    const inHour = localInTime.getUTCHours()
+    const inMin = localInTime.getUTCMinutes()
+
+    if (inHour > schedHour || (inHour === schedHour && inMin > schedMin + 15)) {
+      is_late = true // late by more than 15 mins
+    }
+  }
+
   return {
     id: `shift_${baseLog.id}`,
     employee_id: empId,
@@ -99,32 +128,41 @@ function createShift(inLog: Log | null, outLog: Log | null): Shift {
     check_in_time: inLog ? inLog.timestamp : null,
     check_out_time: outLog ? outLog.timestamp : null,
     duration_ms,
-    is_overtime
+    is_overtime,
+    is_late
   }
 }
 
-function computeShifts(logs: Log[]): Shift[] {
+function computeShifts(logs: Log[], schedules: Schedule[]): Shift[] {
   const reversed = [...logs].reverse()
   const shifts: Shift[] = []
   const openShifts: Record<string, Log> = {}
 
   reversed.forEach(log => {
+    // Find schedules for this employee for this day of week
+    const logDate = new Date(log.timestamp)
+    const dayOfWeek = logDate.getDay() || 7 // 1-7 (Mon-Sun)
+    const empSchedules = schedules.filter(s => s.employee_id === log.employee_id && s.day_of_week === dayOfWeek)
+
     if (log.type === 'check_in') {
       openShifts[log.employee_id] = log
     } else if (log.type === 'check_out') {
       const inLog = openShifts[log.employee_id]
       if (inLog) {
-        shifts.push(createShift(inLog, log))
+        shifts.push(createShift(inLog, log, empSchedules))
         delete openShifts[log.employee_id]
       } else {
-        shifts.push(createShift(null, log))
+        shifts.push(createShift(null, log, empSchedules))
       }
     }
   })
 
   // Add remaining open shifts
   Object.values(openShifts).forEach(inLog => {
-    shifts.push(createShift(inLog, null))
+    const logDate = new Date(inLog.timestamp)
+    const dayOfWeek = logDate.getDay() || 7
+    const empSchedules = schedules.filter(s => s.employee_id === inLog.employee_id && s.day_of_week === dayOfWeek)
+    shifts.push(createShift(inLog, null, empSchedules))
   })
 
   return shifts
@@ -152,12 +190,16 @@ export default function AdminDashboard({
   initialTab,
   initialEmployees,
   initialLogs,
-  initialSchedules
+  initialSchedules,
+  initialTransactions,
+  initialAllowedIps
 }: {
   initialTab?: TabKey
   initialEmployees: Employee[]
   initialLogs: Log[]
   initialSchedules: Schedule[]
+  initialTransactions?: Transaction[]
+  initialAllowedIps?: string
 }) {
   const router = useRouter()
   const pathname = usePathname()
@@ -176,6 +218,9 @@ export default function AdminDashboard({
   const [employees, setEmployees] = useState(initialEmployees)
   const [logs, setLogs] = useState(initialLogs)
   const [schedules, setSchedules] = useState(initialSchedules)
+  const [transactions, setTransactions] = useState<Transaction[]>(initialTransactions || [])
+  const [allowedIps, setAllowedIps] = useState(initialAllowedIps || '.*')
+  const [ipInput, setIpInput] = useState(initialAllowedIps || '.*')
   const [isRefreshing, setIsRefreshing] = useState(false)
 
   // Polling data every 30 seconds
@@ -186,6 +231,7 @@ export default function AdminDashboard({
         setEmployees(res.employees || [])
         setLogs(res.logs || [])
         setSchedules(res.schedules || [])
+        setTransactions(res.transactions || [])
       }
     }
     const interval = setInterval(handlePoll, 30000)
@@ -199,9 +245,26 @@ export default function AdminDashboard({
       setEmployees(res.employees || [])
       setLogs(res.logs || [])
       setSchedules(res.schedules || [])
+      setTransactions(res.transactions || [])
+      if (res.allowed_ips) {
+        setAllowedIps(res.allowed_ips)
+        setIpInput(res.allowed_ips)
+      }
       toast.success('Данные успешно обновлены')
     } else {
       toast.error('Ошибка обновления данных')
+    }
+    setIsRefreshing(false)
+  }
+
+  const handleSaveSettings = async () => {
+    setIsRefreshing(true)
+    const res = await updateSetting('allowed_ips', ipInput)
+    if (res.success) {
+      setAllowedIps(ipInput)
+      toast.success('Настройки сохранены')
+    } else {
+      toast.error('Ошибка сохранения: ' + res.error)
     }
     setIsRefreshing(false)
   }
@@ -222,7 +285,26 @@ export default function AdminDashboard({
   const [draggedEmp, setDraggedEmp] = useState<Employee | null>(null)
   const [selectedEmpId, setSelectedEmpId] = useState<string | null>(null)
 
-  const shifts = useMemo(() => computeShifts(logs), [logs])
+  // Finance Modals
+  const [financeModalOpen, setFinanceModalOpen] = useState(false)
+  const [selectedFinanceEmp, setSelectedFinanceEmp] = useState<Employee | null>(null)
+  const [withdrawAmount, setWithdrawAmount] = useState('')
+
+  // Schedule Modal
+  const [scheduleModalOpen, setScheduleModalOpen] = useState(false)
+  const [scheduleDayTarget, setScheduleDayTarget] = useState<number>(1)
+  const [scheduleTargetEmp, setScheduleTargetEmp] = useState<Employee | null>(null)
+  const [editingScheduleId, setEditingScheduleId] = useState<string | null>(null)
+  const [schedStartInput, setSchedStartInput] = useState('09:00')
+  const [schedEndInput, setSchedEndInput] = useState('22:00')
+  const [schedSalaryInput, setSchedSalaryInput] = useState('5000')
+
+  // Manual Check-in Modal
+  const [manualCheckModalOpen, setManualCheckModalOpen] = useState(false)
+  const [manualCheckEmp, setManualCheckEmp] = useState<Employee | null>(null)
+  const [manualCheckType, setManualCheckType] = useState<'check_in' | 'check_out'>('check_in')
+
+  const shifts = useMemo(() => computeShifts(logs, schedules), [logs, schedules])
 
   // Group shifts for calendar
   const calendarShifts = useMemo(() => {
@@ -354,33 +436,53 @@ export default function AdminDashboard({
       return
     }
 
-    const start = prompt(`Укажите время начала (HH:MM) для ${emp.name}:`, "09:00")
-    if (!start) return
-    const end = prompt(`Укажите время окончания (HH:MM) для ${emp.name}:`, "22:00")
-    if (!end) return
+    const start = "09:00"
+    const end = "22:00"
+    const salary = "5000"
 
-    const res = await addSchedule(emp.id, dayIndex + 1, start, end)
-    if (res.success) {
-      toast.success(`В расписание добавлен(а) ${emp.name}`)
-      setSelectedEmpId(null)
-      manualRefresh()
-    } else {
-      toast.error('Ошибка добавления: ' + res.error)
-    }
+    setScheduleTargetEmp(emp)
+    setScheduleDayTarget(dayIndex + 1)
+    setSchedStartInput(start)
+    setSchedEndInput(end)
+    setSchedSalaryInput(salary)
+    setEditingScheduleId(null)
+    setScheduleModalOpen(true)
   }
 
-  const handleScheduleEdit = async (sched: Schedule) => {
-    const start = prompt(`Изменить начало (${sched.start_time}):`, sched.start_time)
-    if (!start) return
-    const end = prompt(`Изменить конец (${sched.end_time}):`, sched.end_time)
-    if (!end) return
-    const res = await updateSchedule(sched.id, start, end)
-    if (res.success) {
-      setSchedules(schedules.map(s => s.id === sched.id ? { ...s, start_time: start, end_time: end } : s))
-      toast.success('Расписание обновлено')
+  const handleScheduleEdit = (sched: Schedule) => {
+    setEditingScheduleId(sched.id)
+    setSchedStartInput(sched.start_time.substring(0, 5))
+    setSchedEndInput(sched.end_time.substring(0, 5))
+    setSchedSalaryInput(sched.shift_salary?.toString() || '0')
+    const emp = employees.find(e => e.id === sched.employee_id)
+    setScheduleTargetEmp(emp || null)
+    setScheduleDayTarget(sched.day_of_week)
+    setScheduleModalOpen(true)
+  }
+
+  const handleSaveSchedule = async () => {
+    if (!scheduleTargetEmp) return
+    const salary = Number(schedSalaryInput) || 0
+    if (editingScheduleId) {
+      const res = await updateSchedule(editingScheduleId, schedStartInput, schedEndInput, salary)
+      if (res.success) {
+        setSchedules(schedules.map(s => s.id === editingScheduleId ? { ...s, start_time: schedStartInput, end_time: schedEndInput, shift_salary: salary } : s))
+        toast.success('Расписание обновлено')
+      } else {
+        toast.error('Ошибка: ' + res.error)
+      }
     } else {
-      toast.error('Ошибка: ' + res.error)
+      const res = await addSchedule(scheduleTargetEmp.id, scheduleDayTarget, schedStartInput, schedEndInput, salary)
+      if (res.success) {
+        toast.success(`В расписание добавлен(а) ${scheduleTargetEmp.name}`)
+        manualRefresh()
+      } else {
+        toast.error('Ошибка добавления: ' + res.error)
+      }
     }
+    setScheduleModalOpen(false)
+    setEditingScheduleId(null)
+    setScheduleTargetEmp(null)
   }
 
   const handleScheduleDelete = async (id: string) => {
@@ -394,30 +496,144 @@ export default function AdminDashboard({
     }
   }
 
+  // Finance Handlers
+  const openFinanceModal = (emp: Employee) => {
+    setSelectedFinanceEmp(emp)
+    setWithdrawAmount('')
+    setFinanceModalOpen(true)
+  }
+
+  const handleWithdraw = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!selectedFinanceEmp) return
+    const amount = Number(withdrawAmount)
+    if (isNaN(amount) || amount <= 0) {
+      toast.error('Введите корректную сумму')
+      return
+    }
+    const res = await withdrawSalary(selectedFinanceEmp.id, amount)
+    if (res.success) {
+      toast.success('Средства успешно списаны')
+      setEmployees(employees.map(emp => emp.id === selectedFinanceEmp.id ? { ...emp, balance: res.newBalance || 0 } : emp))
+      manualRefresh()
+      setFinanceModalOpen(false)
+    } else {
+      toast.error('Ошибка: ' + res.error)
+    }
+  }
+
+  // Manual Check-in Handlers
+  const [manualDatetime, setManualDatetime] = useState(() => {
+    const tzOffsetMs = 5 * 60 * 60 * 1000 // GMT+5
+    const now = new Date(Date.now() + tzOffsetMs)
+    return now.toISOString().slice(0, 16)
+  })
+
+  const openManualCheckModal = (emp: Employee, type: 'check_in' | 'check_out') => {
+    setManualCheckEmp(emp)
+    setManualCheckType(type)
+    const tzOffsetMs = 5 * 60 * 60 * 1000
+    const now = new Date(Date.now() + tzOffsetMs)
+    setManualDatetime(now.toISOString().slice(0, 16))
+    setManualCheckModalOpen(true)
+  }
+
+  const handleManualCheckSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!manualCheckEmp || !manualDatetime) return
+
+    // convert local datetime-local back to UTC string for DB
+    const localMs = new Date(manualDatetime).getTime()
+    const utcMs = localMs - (5 * 60 * 60 * 1000) // subtract GMT+5
+    const isoString = new Date(utcMs).toISOString()
+
+    const res = await manualMarkAttendance(manualCheckEmp.id, manualCheckType, isoString)
+    if (res.success) {
+      toast.success(`Ручная отметка (${manualCheckType === 'check_in' ? 'Пришел' : 'Ушел'}) добавлена`)
+      manualRefresh()
+      setManualCheckModalOpen(false)
+    } else {
+      toast.error('Ошибка: ' + res.error)
+    }
+  }
+
+  const handleManualAccrual = async (empId: string, amount: number) => {
+    if (!confirm(`Зачислить ${amount} тг на баланс сотрудника?`)) return
+    const res = await processShiftAccrual(empId, amount)
+    if (res.success) {
+      toast.success('Средства успешно зачислены')
+      setEmployees(employees.map(emp => emp.id === empId ? { ...emp, balance: res.newBalance || 0 } : emp))
+      manualRefresh()
+    } else {
+      toast.error('Ошибка: ' + res.error)
+    }
+  }
+
   // Calendar render tools
+  const [calendarView, setCalendarView] = useState<'month' | 'week'>('month')
+
+  // Auto-switch to week view on mobile
+  useEffect(() => {
+    const checkMobile = () => {
+      if (window.innerWidth < 1024) {
+        setCalendarView('week')
+      } else {
+        setCalendarView('month')
+      }
+    }
+    checkMobile()
+    window.addEventListener('resize', checkMobile)
+    return () => window.removeEventListener('resize', checkMobile)
+  }, [])
+
   const renderCalendarCell = (year: number, month: number, day: number) => {
     if (day === 0) return <div className="min-h-[140px] bg-gray-50/50 border border-gray-100 rounded-lg p-2 opacity-50"></div>
 
     const dStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`
     const dayShifts = calendarShifts[dStr] || []
 
+    // Group shifts by employee for this cell
+    const groupedShifts: Record<string, Shift[]> = {}
+    dayShifts.forEach(s => {
+      if (!groupedShifts[s.employee_name]) groupedShifts[s.employee_name] = []
+      groupedShifts[s.employee_name].push(s)
+    })
+
     return (
-      <div className="min-h-[140px] border border-gray-200 rounded-xl bg-white p-3 hover:shadow-md transition-shadow relative group">
+      <div className="min-h-[140px] h-full border border-gray-200 rounded-xl bg-white p-3 hover:shadow-md transition-shadow relative group">
         <span className="text-sm font-bold text-gray-400 absolute top-3 right-3">{day}</span>
         <div className="mt-6 flex flex-col gap-2">
-          {dayShifts.map((s, i) => (
-            <div key={i} className={`p-2 rounded-lg text-xs font-semibold shadow-sm border ${s.is_overtime ? 'bg-orange-50 border-orange-200 text-orange-900' : 'bg-blue-50 border-blue-100 text-blue-900'} flex flex-col gap-1`}>
-              <div className="flex justify-between items-center gap-2">
-                <span className="truncate" title={s.employee_name}>{s.employee_name}</span>
-                {s.is_overtime && <ClockAlert className="w-3.5 h-3.5 text-orange-600 shrink-0" />}
+          {Object.entries(groupedShifts).map(([empName, empShifts]) => {
+            const hasOvertime = empShifts.some(s => s.is_overtime)
+            const hasLate = empShifts.some(s => s.is_late)
+            return (
+              <div key={empName} className={`p-2 rounded-lg text-xs font-semibold shadow-sm border ${hasOvertime ? 'bg-orange-50 border-orange-200 text-orange-900' : 'bg-blue-50 border-blue-100 text-blue-900'} flex flex-col gap-1`}>
+                <div className="flex justify-between items-center gap-2">
+                  <span className="truncate" title={empName}>{empName}</span>
+                  <div className="flex gap-1 shrink-0">
+                    {hasLate && <span className="bg-rose-500 text-white text-[9px] px-1 rounded uppercase tracking-wider">Опоздал</span>}
+                    {hasOvertime && <ClockAlert className="w-3.5 h-3.5 text-orange-600" />}
+                  </div>
+                </div>
+                {empShifts.map((s, i) => {
+                  const inT = s.check_in_time ? new Date(s.check_in_time) : null
+                  const outT = s.check_out_time ? new Date(s.check_out_time) : null
+                  const isNextDay = outT && inT && outT.getDate() !== inT.getDate()
+
+                  return (
+                    <div key={i} className="text-[10px] opacity-70 flex justify-between border-t border-black/5 pt-1 mt-1 first:border-0 first:pt-0 first:mt-0">
+                      <span>{inT ? inT.toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' }) : '--:--'}</span>
+                      <span> - </span>
+                      <span>
+                        {outT ? outT.toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' }) : 'Сейчас'}
+                        {isNextDay && <span className="ml-1 text-[8px] font-bold opacity-80">(след.д)</span>}
+                      </span>
+                    </div>
+                  )
+                })}
               </div>
-              <div className="text-[10px] opacity-70 flex justify-between">
-                <span>{s.check_in_time ? new Date(s.check_in_time).toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' }) : '--:--'}</span>
-                <span> - </span>
-                <span>{s.check_out_time ? new Date(s.check_out_time).toLocaleTimeString('ru', { hour: '2-digit', minute: '2-digit' }) : 'Сейчас'}</span>
-              </div>
-            </div>
-          ))}
+            )
+          })}
           {dayShifts.length === 0 && <span className="text-xs text-gray-300 mx-auto mt-2">Нет записей</span>}
         </div>
       </div>
@@ -427,41 +643,88 @@ export default function AdminDashboard({
   const renderMonth = () => {
     const year = currentDate.getFullYear()
     const month = currentDate.getMonth()
-    const daysInMonth = getDaysInMonth(year, month)
-    const firstDay = getFirstDayOfMonth(year, month)
 
-    const calendarDays = Array(firstDay).fill(0).concat(
-      Array.from({ length: daysInMonth }, (_, i) => i + 1)
-    )
+    if (calendarView === 'month') {
+      const daysInMonth = getDaysInMonth(year, month)
+      const firstDay = getFirstDayOfMonth(year, month)
 
-    return (
-      <div className="space-y-4">
-        <div className="flex flex-col sm:flex-row justify-between items-center bg-gray-50 p-4 rounded-xl border border-gray-200 gap-4">
-          <Button variant="outline" onClick={() => setCurrentDate(new Date(year, month - 1, 1))} className="w-full sm:w-auto">
-            Пред. месяц
-          </Button>
-          <h3 className="font-extrabold text-lg md:text-xl text-gray-800 capitalize text-center">
-            {currentDate.toLocaleString('ru-RU', { month: 'long', year: 'numeric' })}
-          </h3>
-          <Button variant="outline" onClick={() => setCurrentDate(new Date(year, month + 1, 1))} className="w-full sm:w-auto">
-            След. месяц
-          </Button>
-        </div>
+      const calendarDays = Array(firstDay).fill(0).concat(
+        Array.from({ length: daysInMonth }, (_, i) => i + 1)
+      )
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
-          {WEEKDAYS.map(day => (
-            <div key={day} className="hidden lg:block text-center font-bold text-gray-500 text-sm py-2">
-              {day}
+      return (
+        <div className="space-y-4">
+          <div className="flex flex-col sm:flex-row justify-between items-center bg-gray-50 p-4 rounded-xl border border-gray-200 gap-4">
+            <Button variant="outline" onClick={() => setCurrentDate(new Date(year, month - 1, 1))} className="w-full sm:w-auto">
+              Пред. месяц
+            </Button>
+            <h3 className="font-extrabold text-lg md:text-xl text-gray-800 capitalize text-center">
+              {currentDate.toLocaleString('ru-RU', { month: 'long', year: 'numeric' })}
+            </h3>
+            <div className="flex gap-2 w-full sm:w-auto">
+              <Button variant="secondary" onClick={() => setCalendarView('week')} className="flex-1">5 дней</Button>
+              <Button variant="outline" onClick={() => setCurrentDate(new Date(year, month + 1, 1))} className="flex-1">
+                След. месяц
+              </Button>
             </div>
-          ))}
-          {calendarDays.map((day, i) => (
-            <div key={i} className={day === 0 ? "hidden lg:block" : ""}>
-              {renderCalendarCell(year, month, day)}
-            </div>
-          ))}
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
+            {WEEKDAYS.map(day => (
+              <div key={day} className="hidden lg:block text-center font-bold text-gray-500 text-sm py-2">
+                {day}
+              </div>
+            ))}
+            {calendarDays.map((day, i) => (
+              <div key={i} className={day === 0 ? "hidden lg:block" : ""}>
+                {renderCalendarCell(year, month, day)}
+              </div>
+            ))}
+          </div>
         </div>
-      </div>
-    )
+      )
+    } else {
+      // 5-Day View (Current Date + 2, Current Date - 2)
+      const days = []
+      for (let i = -2; i <= 2; i++) {
+        const d = new Date(currentDate)
+        d.setDate(d.getDate() + i)
+        days.push(d)
+      }
+
+      return (
+        <div className="space-y-4">
+          <div className="flex flex-col sm:flex-row justify-between items-center bg-gray-50 p-4 rounded-xl border border-gray-200 gap-4">
+            <Button variant="outline" onClick={() => { const d = new Date(currentDate); d.setDate(d.getDate() - 5); setCurrentDate(d) }} className="w-full sm:w-auto">
+              Назад
+            </Button>
+            <h3 className="font-extrabold text-lg md:text-xl text-gray-800 capitalize text-center">
+              {currentDate.toLocaleString('ru-RU', { month: 'long', year: 'numeric' })}
+            </h3>
+            <div className="flex gap-2 w-full sm:w-auto">
+              <Button variant="secondary" onClick={() => setCalendarView('month')} className="flex-1 hidden lg:block">Месяц</Button>
+              <Button variant="outline" onClick={() => { const d = new Date(currentDate); d.setDate(d.getDate() + 5); setCurrentDate(d) }} className="flex-1">
+                Вперед
+              </Button>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-5 gap-3">
+            {days.map((d, i) => {
+              const dayName = d.toLocaleDateString('ru-RU', { weekday: 'short' })
+              return (
+                <div key={i} className="flex flex-col">
+                  <div className="text-center font-bold text-gray-500 text-sm py-2 capitalize">
+                    {dayName}, {d.getDate()}
+                  </div>
+                  {renderCalendarCell(d.getFullYear(), d.getMonth(), d.getDate())}
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )
+    }
   }
 
   return (
@@ -511,6 +774,15 @@ export default function AdminDashboard({
                 <Clock className="w-4 h-4" />
                 Логи
               </Button>
+              <Button
+                variant={activeTab === 'settings' ? 'default' : 'ghost'}
+                onClick={() => setActiveTab('settings')}
+                className={`flex-none gap-2 px-4 md:px-6 shadow-none transition-all ${activeTab === 'settings' ? 'bg-white text-blue-700 shadow-sm' : 'text-gray-500 hover:text-gray-900 bg-transparent'
+                  }`}
+              >
+                <Settings className="w-4 h-4" />
+                Настройки
+              </Button>
             </div>
           </div>
         </div>
@@ -541,7 +813,8 @@ export default function AdminDashboard({
                       <th className="px-6 py-4">Имя</th>
                       <th className="px-6 py-4 text-center">Статус</th>
                       <th className="px-6 py-4 text-center">Устройство</th>
-                      <th className="px-6 py-4 text-center">На смене?</th>
+                      <th className="px-6 py-4 text-center">Смена</th>
+                      <th className="px-6 py-4 text-center">Баланс (Депозит)</th>
                       <th className="px-6 py-4 text-right border-l border-gray-100">Действия</th>
                     </tr>
                   </thead>
@@ -549,6 +822,7 @@ export default function AdminDashboard({
                     {employees.map(emp => {
                       const isEditing = editingId === emp.id
                       const isCheckedIn = isEmployeeCheckedIn(emp.id)
+                      const currentBalance = emp.balance || 0
                       return (
                         <tr key={emp.id} className={`hover:bg-gray-50/50 transition-colors ${emp.is_active === false ? 'opacity-60' : ''}`}>
                           <td className="px-6 py-4 font-medium text-gray-900">
@@ -573,7 +847,33 @@ export default function AdminDashboard({
                             {emp.device_id ? <span className="inline-flex gap-2 px-4 py-1.5 bg-sky-100 text-sky-800 rounded-full text-sm font-bold border border-sky-200"><SmartphoneNfc className="w-4 h-4" /> Привязан</span> : <span className="inline-flex gap-2 px-4 py-1.5 bg-orange-100 text-orange-800 rounded-full text-sm font-bold border border-orange-200"><AlertTriangle className="w-4 h-4" /> Не привязан</span>}
                           </td>
                           <td className="px-6 py-4 text-center whitespace-nowrap">
-                            {isCheckedIn ? <span className="inline-flex gap-2 px-4 py-1.5 bg-green-100 text-green-800 rounded-full text-sm font-bold border border-green-200"><Clock className="w-4 h-4" /> Работает</span> : <span className="inline-flex gap-2 px-4 py-1.5 bg-gray-100 text-gray-600 rounded-full text-sm font-bold border border-gray-200"><span className="w-2 h-2 rounded-full bg-gray-400"></span> Нет на месте</span>}
+                            <div className="flex flex-col items-center gap-2">
+                              {isCheckedIn ? (
+                                <button
+                                  onClick={() => openManualCheckModal(emp, 'check_out')}
+                                  className="inline-flex gap-2 px-4 py-1.5 bg-green-100/80 hover:bg-green-100 text-green-800 rounded-full text-sm font-bold border border-green-200 cursor-pointer transition-colors"
+                                  title="Нажмите для ручного ухода"
+                                >
+                                  <Clock className="w-4 h-4" /> Работает
+                                </button>
+                              ) : (
+                                <button
+                                  onClick={() => openManualCheckModal(emp, 'check_in')}
+                                  className="inline-flex gap-2 px-4 py-1.5 bg-gray-100/80 hover:bg-gray-200 text-gray-600 rounded-full text-sm font-bold border border-gray-200 cursor-pointer transition-colors"
+                                  title="Нажмите для ручного прихода"
+                                >
+                                  <span className="w-2 h-2 rounded-full bg-gray-400 mt-1.5"></span> Нет на месте
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                          <td className="px-6 py-4 text-center whitespace-nowrap">
+                            <div className="flex flex-col items-center gap-2">
+                              <span className="font-extrabold text-blue-900 text-lg">{currentBalance.toLocaleString('ru-RU')} ₸</span>
+                              <Button size="sm" variant="secondary" className="h-7 text-[11px] font-semibold bg-blue-50 text-blue-700 hover:bg-blue-100" onClick={() => openFinanceModal(emp)}>
+                                <Wallet className="w-3 h-3 mr-1" /> Снять
+                              </Button>
+                            </div>
                           </td>
                           <td className="px-6 py-4 border-l border-gray-100">
                             <div className="flex items-center justify-end gap-2">
@@ -584,10 +884,10 @@ export default function AdminDashboard({
                                 </>
                               ) : (
                                 <>
-                                  {isCheckedIn && <Button size="icon" variant="destructive" onClick={() => handleForceOut(emp.id, emp.name)} className="mr-4"><LogOut className="w-5 h-5" /></Button>}
-                                  {emp.device_id && <Button size="icon" variant="warning" onClick={() => handleResetDevice(emp.id)}><RefreshCw className="w-5 h-5" /></Button>}
-                                  <Button size="icon" variant="default" onClick={() => startEdit(emp)}><Edit2 className="w-5 h-5" /></Button>
-                                  <Button size="icon" variant="destructive" onClick={() => handleDelete(emp.id, emp.name)}><Trash2 className="w-5 h-5" /></Button>
+                                  <Button size="icon" variant="outline" className="mr-2 text-emerald-600 border-emerald-200 hover:bg-emerald-50" title="Зачислить ЗП вручную" onClick={() => handleManualAccrual(emp.id, 5000)}><Landmark className="w-5 h-5" /></Button>
+                                  {emp.device_id && <Button size="icon" variant="warning" onClick={() => handleResetDevice(emp.id)} title="Отвязать устройство"><RefreshCw className="w-5 h-5" /></Button>}
+                                  <Button size="icon" variant="default" onClick={() => startEdit(emp)} title="Изменить"><Edit2 className="w-5 h-5" /></Button>
+                                  <Button size="icon" variant="destructive" onClick={() => handleDelete(emp.id, emp.name)} title="Удалить"><Trash2 className="w-5 h-5" /></Button>
                                 </>
                               )}
                             </div>
@@ -740,8 +1040,151 @@ export default function AdminDashboard({
             </div>
           )}
 
+          {/* Settings Tab */}
+          {activeTab === 'settings' && (
+            <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 max-w-2xl mx-auto">
+              <h2 className="text-xl font-bold text-gray-800 mb-6 flex items-center gap-2">
+                <Settings className="w-5 h-5 text-gray-500" />
+                Настройки Системы
+              </h2>
+              <div className="space-y-6">
+                <div className="bg-blue-50/50 p-4 rounded-xl border border-blue-100">
+                  <label className="block text-sm font-bold text-blue-900 mb-2">Разрешенные IP адреса (RegEx)</label>
+                  <p className="text-xs text-blue-700/70 mb-4">Настройте регулярное выражение для проверки IP-адресов сотрудников при отметке. По умолчанию `.*` разрешает все сети.</p>
+                  <div className="flex gap-3 items-center">
+                    <Input
+                      value={ipInput}
+                      onChange={e => setIpInput(e.target.value)}
+                      placeholder="Например: ^5\.76\.\d{1,3}\.\d{1,3}$"
+                      className="font-mono bg-white"
+                    />
+                    <Button onClick={handleSaveSettings} disabled={isRefreshing} className="flex-none bg-blue-600 hover:bg-blue-700">
+                      Сохранить
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
         </div>
       </div>
+
+      {/* --- MODALS --- */}
+
+      {/* Schedule Edit Modal */}
+      {scheduleModalOpen && scheduleTargetEmp && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in">
+          <div className="bg-white rounded-2xl w-full max-w-md shadow-2xl p-6 border border-gray-100">
+            <h3 className="text-xl font-bold mb-4">{editingScheduleId ? 'Изменить расписание' : 'Добавить в расписание'}</h3>
+            <p className="font-semibold text-gray-700 mb-6 pb-4 border-b">Сотрудник: <span className="text-blue-600">{scheduleTargetEmp.name}</span></p>
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-semibold text-gray-600 mb-1">Время начала</label>
+                <Input type="time" value={schedStartInput} onChange={e => setSchedStartInput(e.target.value)} className="h-12" />
+              </div>
+              <div>
+                <label className="block text-sm font-semibold text-gray-600 mb-1">Время окончания</label>
+                <Input type="time" value={schedEndInput} onChange={e => setSchedEndInput(e.target.value)} className="h-12" />
+              </div>
+              <div>
+                <label className="block text-sm font-semibold text-gray-600 mb-1">Зарплата за смену (тг)</label>
+                <Input type="number" value={schedSalaryInput} onChange={e => setSchedSalaryInput(e.target.value)} className="h-12" />
+              </div>
+
+              <div className="flex justify-end gap-3 mt-8 pt-4 border-t">
+                <Button variant="outline" onClick={() => setScheduleModalOpen(false)}>Отмена</Button>
+                <Button variant="success" onClick={handleSaveSchedule}>Сохранить</Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Finance Withdraw Modal */}
+      {financeModalOpen && selectedFinanceEmp && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in">
+          <div className="bg-white rounded-2xl w-full max-w-md shadow-2xl p-6 border border-gray-100">
+            <div className="flex justify-between items-center mb-6">
+              <h3 className="text-xl font-bold flex items-center gap-2"><Wallet className="text-blue-600" /> Снятие средств</h3>
+              <Button size="icon" variant="ghost" className="h-8 w-8 text-gray-400 rounded-full" onClick={() => setFinanceModalOpen(false)}><X className="w-4 h-4" /></Button>
+            </div>
+
+            <div className="bg-blue-50/50 rounded-xl p-4 border border-blue-100 mb-6">
+              <p className="text-sm text-blue-800 font-medium">Текущий депозит</p>
+              <h4 className="text-3xl font-extrabold text-blue-900 mt-1">{selectedFinanceEmp.balance?.toLocaleString('ru-RU')} ₸</h4>
+              <p className="text-sm text-blue-600/70 mt-1">{selectedFinanceEmp.name}</p>
+            </div>
+
+            <form onSubmit={handleWithdraw}>
+              <div className="space-y-2 mb-6">
+                <label className="text-sm font-bold text-gray-700">Сумма к выдаче</label>
+                <div className="relative">
+                  <Input type="number" required max={selectedFinanceEmp.balance} placeholder="Например, 5000" value={withdrawAmount} onChange={e => setWithdrawAmount(e.target.value)} className="pl-4 pr-12 h-14 text-lg font-semibold" autoFocus />
+                  <span className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-400 font-bold">₸</span>
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-3 pt-4 border-t border-gray-100">
+                <Button type="button" variant="outline" className="h-11" onClick={() => setFinanceModalOpen(false)}>Отмена</Button>
+                <Button type="submit" variant="success" className="h-11 shadow-sm"><HandCoins className="w-4 h-4 mr-2" /> Выдать</Button>
+              </div>
+            </form>
+
+            {/* Mini internal history could be here */}
+            <div className="mt-8">
+              <h5 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">Последние операции (5)</h5>
+              <div className="space-y-2">
+                {transactions.filter(t => t.employee_id === selectedFinanceEmp.id).slice(0, 5).map(tx => (
+                  <div key={tx.id} className="flex justify-between items-center text-sm py-2 border-b border-gray-50 last:border-0">
+                    <span className="text-gray-500 font-medium">{new Date(tx.timestamp).toLocaleDateString('ru')}</span>
+                    <span className={`font-bold ${tx.type === 'accrual' ? 'text-emerald-600' : 'text-rose-600'}`}>
+                      {tx.type === 'accrual' ? '+' : '-'}{tx.amount.toLocaleString()} ₸
+                    </span>
+                  </div>
+                ))}
+                {transactions.filter(t => t.employee_id === selectedFinanceEmp.id).length === 0 && (
+                  <p className="text-sm text-gray-400 text-center py-2">Нет записей</p>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Manual Check-in/out Modal */}
+      {manualCheckModalOpen && manualCheckEmp && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in">
+          <div className="bg-white rounded-2xl w-full max-w-sm shadow-2xl p-6 border border-gray-100">
+            <h3 className="text-xl font-bold mb-4 flex items-center gap-2">
+              <ClockAlert className={manualCheckType === 'check_in' ? 'text-emerald-500' : 'text-rose-500'} />
+              Ручная отметка
+            </h3>
+            <p className="font-semibold text-gray-700 mb-6 pb-4 border-b">Сотрудник: <span className="text-blue-600">{manualCheckEmp.name}</span></p>
+
+            <form onSubmit={handleManualCheckSubmit} className="space-y-4">
+              <div>
+                <label className="block text-sm font-semibold text-gray-600 mb-1">Тип отметки</label>
+                <div className={`p-3 rounded-lg border font-bold text-center ${manualCheckType === 'check_in' ? 'bg-emerald-50 text-emerald-800 border-emerald-200' : 'bg-rose-50 text-rose-800 border-rose-200'}`}>
+                  {manualCheckType === 'check_in' ? '🟢 Пришел' : '🔴 Ушел'}
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-semibold text-gray-600 mb-1">Дата и время</label>
+                <Input type="datetime-local" required value={manualDatetime} onChange={e => setManualDatetime(e.target.value)} className="h-12" />
+              </div>
+
+              <div className="flex justify-end gap-3 mt-8 pt-4 border-t">
+                <Button type="button" variant="outline" onClick={() => setManualCheckModalOpen(false)}>Отмена</Button>
+                <Button type="submit" variant={manualCheckType === 'check_in' ? 'success' : 'destructive'}>Подтвердить</Button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
     </div>
   )
 }

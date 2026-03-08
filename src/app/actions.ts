@@ -12,6 +12,26 @@ const supabase = createClient(supabaseUrl, supabaseServiceKey, {
   }
 })
 
+// === Settings actions ===
+export async function getSetting(key: string) {
+  try {
+    const { data } = await supabase.from('settings').select('value').eq('key', key).single()
+    return data?.value || null
+  } catch (e) {
+    return null
+  }
+}
+
+export async function updateSetting(key: string, value: string) {
+  try {
+    const { error } = await supabase.from('settings').upsert({ key, value })
+    if (error) return { success: false, error: error.message }
+    return { success: true }
+  } catch (e: any) {
+    return { success: false, error: e.message }
+  }
+}
+
 // === Employee actions ===
 
 export async function getEmployeeByDevice(deviceId: string) {
@@ -63,15 +83,39 @@ export async function markAttendance(
 ) {
   const headersList = await headers()
   const rawIp = headersList.get('x-forwarded-for') || headersList.get('x-real-ip') || 'unknown'
-  
+
   // Strip IPv6 prefix if present
   let finalIp = rawIp.split(',')[0].trim()
   if (finalIp.startsWith('::ffff:')) {
     finalIp = finalIp.substring(7)
   }
 
-  // IP check
-  if (finalIp !== allowedIp && allowedIp !== '*') {
+  // Get allowed IP regex from DB, fallback to env
+  let ipRegexStr = allowedIp
+  try {
+    const { data: setting } = await supabase.from('settings').select('value').eq('key', 'allowed_ips').single()
+    if (setting && setting.value) {
+      ipRegexStr = setting.value
+    }
+  } catch (e) {
+    console.error("Error fetching allowed_ips setting:", e)
+  }
+
+  // IP check using RegExp
+  let isAllowed = false
+  if (ipRegexStr === '*') {
+    isAllowed = true
+  } else {
+    try {
+      const regex = new RegExp(ipRegexStr)
+      isAllowed = regex.test(finalIp)
+    } catch (e) {
+      // Fallback if regex is invalid
+      isAllowed = finalIp === ipRegexStr
+    }
+  }
+
+  if (!isAllowed) {
     return { success: false, error: `Доступ запрещен. Ваш IP: ${finalIp}. Пожалуйста, подключитесь к рабочей сети Wi-Fi ресторана (Doner Centr 5G).` }
   }
 
@@ -87,6 +131,29 @@ export async function markAttendance(
   const { error: insErr } = await supabase
     .from('attendance_logs')
     .insert([{ employee_id: employeeId, type, ip_address: finalIp }])
+
+  if (insErr) return { success: false, error: insErr.message }
+  return { success: true, type }
+}
+
+export async function manualMarkAttendance(
+  employeeId: string,
+  type: string,
+  timestampStr?: string
+) {
+  // timestampStr should be an ISO string if provided, otherwise defaults to now
+  const payload: any = {
+    employee_id: employeeId,
+    type,
+    ip_address: 'Администратор (Ручной ввод)'
+  }
+  if (timestampStr) {
+    payload.timestamp = timestampStr
+  }
+
+  const { error: insErr } = await supabase
+    .from('attendance_logs')
+    .insert([payload])
 
   if (insErr) return { success: false, error: insErr.message }
   return { success: true, type }
@@ -148,10 +215,10 @@ export async function resetDevice(id: string) {
 export async function forceCheckOutAdmin(employeeId: string) {
   const { error } = await supabase
     .from('attendance_logs')
-    .insert([{ 
-      employee_id: employeeId, 
-      type: 'check_out', 
-      ip_address: 'Администратор (Принудительно)' 
+    .insert([{
+      employee_id: employeeId,
+      type: 'check_out',
+      ip_address: 'Администратор (Принудительно)'
     }])
 
   if (error) return { success: false, error: error.message }
@@ -179,18 +246,18 @@ export async function getSchedules() {
   return data || []
 }
 
-export async function addSchedule(employeeId: string, dayOfWeek: number, startTime: string, endTime: string) {
+export async function addSchedule(employeeId: string, dayOfWeek: number, startTime: string, endTime: string, shiftSalary: number = 0) {
   const { error } = await supabase
     .from('schedules')
-    .insert([{ employee_id: employeeId, day_of_week: dayOfWeek, start_time: startTime, end_time: endTime }])
+    .insert([{ employee_id: employeeId, day_of_week: dayOfWeek, start_time: startTime, end_time: endTime, shift_salary: shiftSalary }])
   if (error) return { success: false, error: error.message }
   return { success: true }
 }
 
-export async function updateSchedule(id: string, startTime: string, endTime: string) {
+export async function updateSchedule(id: string, startTime: string, endTime: string, shiftSalary: number = 0) {
   const { error } = await supabase
     .from('schedules')
-    .update({ start_time: startTime, end_time: endTime })
+    .update({ start_time: startTime, end_time: endTime, shift_salary: shiftSalary })
     .eq('id', id)
   if (error) return { success: false, error: error.message }
   return { success: true }
@@ -205,11 +272,89 @@ export async function deleteSchedule(id: string) {
   return { success: true }
 }
 
+// === Financial / Deposit actions === //
+
+export async function getTransactions(employeeId?: string) {
+  let query = supabase.from('transactions').select('*').order('timestamp', { ascending: false })
+  if (employeeId) {
+    query = query.eq('employee_id', employeeId)
+  }
+  const { data } = await query
+  return data || []
+}
+
+export async function processShiftAccrual(employeeId: string, amount: number) {
+  if (amount <= 0) return { success: false, error: 'Сумма должна быть больше 0' }
+
+  // 1. Get current balance
+  const { data: emp, error: empErr } = await supabase
+    .from('employees')
+    .select('balance')
+    .eq('id', employeeId)
+    .single()
+
+  if (empErr) return { success: false, error: empErr.message }
+
+  // 2. Insert transaction
+  const { error: txErr } = await supabase
+    .from('transactions')
+    .insert([{ employee_id: employeeId, amount, type: 'accrual' }])
+
+  if (txErr) return { success: false, error: txErr.message }
+
+  // 3. Update balance
+  const newBalance = (Number(emp.balance) || 0) + Number(amount)
+  const { error: updErr } = await supabase
+    .from('employees')
+    .update({ balance: newBalance })
+    .eq('id', employeeId)
+
+  if (updErr) return { success: false, error: updErr.message }
+
+  return { success: true, newBalance }
+}
+
+export async function withdrawSalary(employeeId: string, amount: number) {
+  if (amount <= 0) return { success: false, error: 'Сумма должна быть больше 0' }
+
+  // 1. Get current balance
+  const { data: emp, error: empErr } = await supabase
+    .from('employees')
+    .select('balance')
+    .eq('id', employeeId)
+    .single()
+
+  if (empErr) return { success: false, error: empErr.message }
+
+  const currentBalance = Number(emp.balance) || 0
+  if (currentBalance < amount) return { success: false, error: 'Недостаточно средств на депозите' }
+
+  // 2. Insert transaction
+  const { error: txErr } = await supabase
+    .from('transactions')
+    .insert([{ employee_id: employeeId, amount, type: 'withdrawal' }])
+
+  if (txErr) return { success: false, error: txErr.message }
+
+  // 3. Update balance
+  const newBalance = currentBalance - Number(amount)
+  const { error: updErr } = await supabase
+    .from('employees')
+    .update({ balance: newBalance })
+    .eq('id', employeeId)
+
+  if (updErr) return { success: false, error: updErr.message }
+
+  return { success: true, newBalance }
+}
+
 export async function getAdminDashboardData() {
-  const [employees, logs, schedules] = await Promise.all([
+  const [employees, logs, schedules, transactions, ipSetting] = await Promise.all([
     getEmployees(),
     getLogs(),
-    getSchedules()
+    getSchedules(),
+    getTransactions(),
+    getSetting('allowed_ips')
   ])
-  return { success: true, employees, logs, schedules }
+  return { success: true, employees, logs, schedules, transactions, allowed_ips: ipSetting || '.*' }
 }
