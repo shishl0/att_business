@@ -299,6 +299,11 @@ export default function AdminDashboard({
   const [schedEndInput, setSchedEndInput] = useState('22:00')
   const [schedSalaryInput, setSchedSalaryInput] = useState('5000')
 
+  // Manual Accrual Modal
+  const [accrualModalOpen, setAccrualModalOpen] = useState(false)
+  const [accrualEmp, setAccrualEmp] = useState<Employee | null>(null)
+  const [accrualAmountInput, setAccrualAmountInput] = useState('')
+
   // Manual Check-in Modal
   const [manualCheckModalOpen, setManualCheckModalOpen] = useState(false)
   const [manualCheckEmp, setManualCheckEmp] = useState<Employee | null>(null)
@@ -557,13 +562,40 @@ export default function AdminDashboard({
     }
   }
 
-  const handleManualAccrual = async (empId: string, amount: number) => {
-    if (!confirm(`Зачислить ${amount} тг на баланс сотрудника?`)) return
-    const res = await processShiftAccrual(empId, amount)
+  const openAccrualModal = (emp: Employee) => {
+    setAccrualEmp(emp)
+
+    const tzOffsetMs = 5 * 60 * 60 * 1000 // GMT+5
+    const nowLocal = new Date(Date.now() + tzOffsetMs)
+    const dayOfWeek = nowLocal.getDay() || 7 // 1 = Mon ... 7 = Sun
+
+    // Check if employee has a schedule today
+    const todaySched = schedules.find(s => s.employee_id === emp.id && s.day_of_week === dayOfWeek)
+
+    let defaultSalary = 5000
+    if (todaySched && todaySched.shift_salary) {
+      defaultSalary = todaySched.shift_salary
+    }
+
+    setAccrualAmountInput(defaultSalary.toString())
+    setAccrualModalOpen(true)
+  }
+
+  const handleManualAccrualSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!accrualEmp) return
+    const amount = Number(accrualAmountInput)
+    if (isNaN(amount) || amount <= 0) {
+      toast.error('Введите корректную сумму')
+      return
+    }
+
+    const res = await processShiftAccrual(accrualEmp.id, amount)
     if (res.success) {
       toast.success('Средства успешно зачислены')
-      setEmployees(employees.map(emp => emp.id === empId ? { ...emp, balance: res.newBalance || 0 } : emp))
+      setEmployees(employees.map(emp => emp.id === accrualEmp.id ? { ...emp, balance: res.newBalance || 0 } : emp))
       manualRefresh()
+      setAccrualModalOpen(false)
     } else {
       toast.error('Ошибка: ' + res.error)
     }
@@ -884,7 +916,7 @@ export default function AdminDashboard({
                                 </>
                               ) : (
                                 <>
-                                  <Button size="icon" variant="outline" className="mr-2 text-emerald-600 border-emerald-200 hover:bg-emerald-50" title="Зачислить ЗП вручную" onClick={() => handleManualAccrual(emp.id, 5000)}><Landmark className="w-5 h-5" /></Button>
+                                  <Button size="icon" variant="outline" className="mr-2 text-emerald-600 border-emerald-200 hover:bg-emerald-50" title="Зачислить ЗП вручную" onClick={() => openAccrualModal(emp)}><Landmark className="w-5 h-5" /></Button>
                                   {emp.device_id && <Button size="icon" variant="warning" onClick={() => handleResetDevice(emp.id)} title="Отвязать устройство"><RefreshCw className="w-5 h-5" /></Button>}
                                   <Button size="icon" variant="default" onClick={() => startEdit(emp)} title="Изменить"><Edit2 className="w-5 h-5" /></Button>
                                   <Button size="icon" variant="destructive" onClick={() => handleDelete(emp.id, emp.name)} title="Удалить"><Trash2 className="w-5 h-5" /></Button>
@@ -1179,6 +1211,35 @@ export default function AdminDashboard({
               <div className="flex justify-end gap-3 mt-8 pt-4 border-t">
                 <Button type="button" variant="outline" onClick={() => setManualCheckModalOpen(false)}>Отмена</Button>
                 <Button type="submit" variant={manualCheckType === 'check_in' ? 'success' : 'destructive'}>Подтвердить</Button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Manual Accrual Modal */}
+      {accrualModalOpen && accrualEmp && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in">
+          <div className="bg-white rounded-2xl w-full max-w-sm shadow-2xl p-6 border border-gray-100">
+            <h3 className="text-xl font-bold mb-4 flex items-center gap-2">
+              <Landmark className="text-emerald-500 w-6 h-6" />
+              Начисление зарплаты
+            </h3>
+            <p className="font-semibold text-gray-700 mb-6 pb-4 border-b">Сотрудник: <span className="text-blue-600">{accrualEmp.name}</span></p>
+
+            <form onSubmit={handleManualAccrualSubmit} className="space-y-4">
+              <div>
+                <label className="block text-sm font-bold text-gray-700">Сумма зачисления (₸)</label>
+                <div className="relative mt-2">
+                  <Input type="number" required placeholder="Например, 5000" min="0" step="10" value={accrualAmountInput} onChange={e => setAccrualAmountInput(e.target.value)} className="pl-4 pr-12 h-14 text-lg font-semibold border-emerald-200 focus-visible:ring-emerald-500" autoFocus />
+                  <span className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-400 font-bold">₸</span>
+                </div>
+                <p className="text-xs text-gray-400 mt-2">Сумма автоматически подтянута из расписания на сегодня (если есть).</p>
+              </div>
+
+              <div className="flex justify-end gap-3 mt-8 pt-4 border-t">
+                <Button type="button" variant="outline" onClick={() => setAccrualModalOpen(false)}>Отмена</Button>
+                <Button type="submit" variant="success">Зачислить</Button>
               </div>
             </form>
           </div>
