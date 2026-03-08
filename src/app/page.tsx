@@ -5,12 +5,14 @@ import fpPromise from '@fingerprintjs/fingerprintjs'
 import { getEmployeeByDevice, getUnlinkedEmployees, linkDevice, getLastLogAction, markAttendance } from './actions'
 import { Loader2, Fingerprint } from 'lucide-react'
 
-type Employee = { id: string, name: string }
+type Employee = { id: string, name: string, balance?: number }
+type Schedule = { start_time: string, end_time: string, shift_salary: number }
 
 export default function Home() {
   const [fingerprint, setFingerprint] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [employee, setEmployee] = useState<Employee | null>(null)
+  const [todaySchedule, setTodaySchedule] = useState<Schedule | null>(null)
 
   const [unlinked, setUnlinked] = useState<Employee[]>([])
   const [selectedEmployeeId, setSelectedEmployeeId] = useState('')
@@ -46,12 +48,30 @@ export default function Home() {
       setEmployee(emp)
       const action = await getLastLogAction(emp.id)
       setLastAction(action?.type || 'check_out')
+
+      // Fetch today's schedule to show salary
+      const supabase = (await import('@supabase/supabase-js')).createClient(
+        process.env.NEXT_PUBLIC_SUPABASE_URL!,
+        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+      )
+      const now = new Date()
+      const dayOfWeek = now.getDay() || 7
+      const { data: sched } = await supabase
+        .from('schedules')
+        .select('start_time, end_time, shift_salary')
+        .eq('employee_id', emp.id)
+        .eq('day_of_week', dayOfWeek)
+        .single()
+
+      setTodaySchedule(sched)
     } else {
       const list = await getUnlinkedEmployees()
       setUnlinked(list)
     }
     setLoading(false)
   }
+
+  const isOnSite = lastAction === 'check_in'
 
   async function handleLink() {
     if (!selectedEmployeeId || !fingerprint) return
@@ -67,12 +87,39 @@ export default function Home() {
 
   async function handleAttendance() {
     if (!employee || !fingerprint) return
-    setChecking(true)
+
     const type = lastAction === 'check_in' ? 'check_out' : 'check_in'
+
+    if (type === 'check_out' && todaySchedule) {
+      const now = new Date()
+      const [schedEndH, schedEndM] = todaySchedule.end_time.split(':').map(Number)
+      const plannedEnd = new Date(now)
+      plannedEnd.setHours(schedEndH, schedEndM, 0, 0)
+
+      const [schedStartH] = todaySchedule.start_time.split(':').map(Number)
+      if (schedEndH < schedStartH && now.getHours() >= schedStartH) {
+        plannedEnd.setDate(plannedEnd.getDate() + 1)
+      }
+
+      const maxEarlyLeave = new Date(plannedEnd.getTime() - 60 * 60000)
+
+      if (now < maxEarlyLeave) {
+        const confirmMsg = `Смена заканчивается в ${todaySchedule.end_time}. Вы уверены, что хотите уйти сейчас? Может быть начислен штраф за ранний уход.`
+        if (!window.confirm(confirmMsg)) {
+          return
+        }
+      }
+    }
+
+    setChecking(true)
 
     const res = await markAttendance(employee.id, type)
     if (res.success) {
       setLastAction(type)
+      if (type === 'check_out') {
+        // Refetch to get updated balance
+        await fetchEmployeeState(fingerprint)
+      }
     } else {
       setErrorMsg(res.error || 'Ошибка записи: ' + res.error)
     }
@@ -180,26 +227,9 @@ export default function Home() {
                 {checking ? (
                   <Loader2 className="w-12 h-12 animate-spin" />
                 ) : (
-                  lastAction === 'check_in' ? 'УЙТИ' : 'ПРИЙТИ'
+                  isOnSite ? 'УШЕЛ' : 'ПРИШЕЛ'
                 )}
               </button>
-
-              <div className={`px-5 py-2.5 rounded-full text-[13px] font-bold tracking-wide transition-colors flex items-center gap-2 shadow-sm ${lastAction === 'check_in'
-                  ? 'bg-emerald-50 text-emerald-700 border border-emerald-100'
-                  : 'bg-gray-100 text-gray-600 border border-gray-200'
-                }`}>
-                {lastAction === 'check_in' ? (
-                  <>
-                    <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
-                    ВЫ НА РАБОЧЕМ МЕСТЕ
-                  </>
-                ) : (
-                  <>
-                    <span className="w-2 h-2 rounded-full bg-gray-400"></span>
-                    ОТСУТСТВУЕТЕ
-                  </>
-                )}
-              </div>
             </div>
           )}
         </div>

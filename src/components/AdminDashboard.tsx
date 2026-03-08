@@ -5,7 +5,7 @@ import { useRouter, usePathname, useSearchParams } from 'next/navigation'
 import {
   addEmployee, resetDevice, updateEmployee, deleteEmployee, forceCheckOutAdmin,
   deleteAllLogs, addSchedule, updateSchedule, deleteSchedule, getAdminDashboardData,
-  manualMarkAttendance, processShiftAccrual, withdrawSalary, updateSetting
+  manualMarkAttendance, processShiftAccrual, withdrawSalary, updateSetting, processDebtOrAdvance
 } from '@/app/actions'
 import * as XLSX from 'xlsx'
 import { Plus, Download, RefreshCw, SmartphoneNfc, Users, Clock, AlertTriangle, Edit2, Check, X, Trash2, CalendarCheck, ClockAlert, LogOut, Calendar as CalendarIcon, GripVertical, Wallet, Landmark, HandCoins, Settings } from 'lucide-react'
@@ -284,6 +284,8 @@ export default function AdminDashboard({
   // Schedule drag-n-drop state
   const [draggedEmp, setDraggedEmp] = useState<Employee | null>(null)
   const [selectedEmpId, setSelectedEmpId] = useState<string | null>(null)
+  const [scheduleViewMode, setScheduleViewMode] = useState<'week' | 'day'>('week')
+  const [selectedDayIdx, setSelectedDayIdx] = useState<number>(0)
 
   // Finance Modals
   const [financeModalOpen, setFinanceModalOpen] = useState(false)
@@ -303,6 +305,12 @@ export default function AdminDashboard({
   const [accrualModalOpen, setAccrualModalOpen] = useState(false)
   const [accrualEmp, setAccrualEmp] = useState<Employee | null>(null)
   const [accrualAmountInput, setAccrualAmountInput] = useState('')
+
+  // Debt Modal
+  const [debtModalOpen, setDebtModalOpen] = useState(false)
+  const [debtEmp, setDebtEmp] = useState<Employee | null>(null)
+  const [debtAmountInput, setDebtAmountInput] = useState('')
+  const [debtCommentInput, setDebtCommentInput] = useState('Аванс / Долг')
 
   // Manual Check-in Modal
   const [manualCheckModalOpen, setManualCheckModalOpen] = useState(false)
@@ -581,21 +589,43 @@ export default function AdminDashboard({
     setAccrualModalOpen(true)
   }
 
-  const handleManualAccrualSubmit = async (e: React.FormEvent) => {
+  const handleAccrualSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!accrualEmp) return
-    const amount = Number(accrualAmountInput)
-    if (isNaN(amount) || amount <= 0) {
+    const amt = Number(accrualAmountInput)
+    if (isNaN(amt) || amt <= 0) {
+      toast.error('К начислению должна быть сумма больше 0')
+      return
+    }
+    const res = await processShiftAccrual(accrualEmp.id, amt, 'Ручное начисление / Премия')
+    if (res.success) {
+      toast.success('Начисление прошло успешно!')
+      setAccrualModalOpen(false)
+      manualRefresh()
+    } else {
+      toast.error('Ошибка: ' + res.error)
+    }
+  }
+
+  const openDebtModal = (emp: Employee) => {
+    setDebtEmp(emp)
+    setDebtAmountInput('')
+    setDebtCommentInput('Аванс / Долг')
+    setDebtModalOpen(true)
+  }
+
+  const handleDebtSubmit = async () => {
+    if (!debtEmp) return
+    const amt = Number(debtAmountInput)
+    if (isNaN(amt) || amt <= 0) {
       toast.error('Введите корректную сумму')
       return
     }
-
-    const res = await processShiftAccrual(accrualEmp.id, amount)
+    const res = await processDebtOrAdvance(debtEmp.id, amt, debtCommentInput)
     if (res.success) {
-      toast.success('Средства успешно зачислены')
-      setEmployees(employees.map(emp => emp.id === accrualEmp.id ? { ...emp, balance: res.newBalance || 0 } : emp))
+      toast.success('Успешно начислен долг/аванс')
+      setDebtModalOpen(false)
       manualRefresh()
-      setAccrualModalOpen(false)
     } else {
       toast.error('Ошибка: ' + res.error)
     }
@@ -900,11 +930,16 @@ export default function AdminDashboard({
                             </div>
                           </td>
                           <td className="px-6 py-4 text-center whitespace-nowrap">
-                            <div className="flex flex-col items-center gap-2">
+                            <div className="flex flex-col items-center gap-1">
                               <span className="font-extrabold text-blue-900 text-lg">{currentBalance.toLocaleString('ru-RU')} ₸</span>
-                              <Button size="sm" variant="secondary" className="h-7 text-[11px] font-semibold bg-blue-50 text-blue-700 hover:bg-blue-100" onClick={() => openFinanceModal(emp)}>
-                                <Wallet className="w-3 h-3 mr-1" /> Снять
-                              </Button>
+                              <div className="flex gap-1">
+                                <Button size="sm" variant="secondary" className="h-7 px-2 text-[11px] font-semibold bg-blue-50 text-blue-700 hover:bg-blue-100" onClick={() => openFinanceModal(emp)}>
+                                  <Wallet className="w-3 h-3 mr-1" /> Снять
+                                </Button>
+                                <Button size="sm" variant="secondary" className="h-7 px-2 text-[11px] font-semibold bg-rose-50 text-rose-700 hover:bg-rose-100" onClick={() => openDebtModal(emp)} title="Аванс или долг">
+                                  <HandCoins className="w-3 h-3 mr-1" /> Долг
+                                </Button>
+                              </div>
                             </div>
                           </td>
                           <td className="px-6 py-4 border-l border-gray-100">
@@ -966,56 +1001,158 @@ export default function AdminDashboard({
                 </div>
               </div>
 
-              {/* Weekly Grid */}
-              <div className="flex-1 grid grid-cols-1 md:grid-cols-3 xl:grid-cols-7 gap-3">
-                {WEEKDAYS.map((day, dIdx) => {
-                  const daySchedules = schedules.filter(s => s.day_of_week === dIdx + 1)
-                  return (
-                    <div
-                      key={day}
-                      className={`bg-gray-50/50 border border-gray-200 rounded-xl flex flex-col overflow-hidden transition-colors cursor-pointer lg:cursor-default ${selectedEmpId ? 'ring-2 ring-blue-300 border-blue-400 bg-blue-50/50' : ''}`}
-                      onDragOver={e => { e.preventDefault(); e.currentTarget.classList.add('bg-blue-100') }}
-                      onDragLeave={e => e.currentTarget.classList.remove('bg-blue-100')}
-                      onDrop={e => { e.currentTarget.classList.remove('bg-blue-100'); handleDropToDay(e, dIdx) }}
-                      onClick={() => {
-                        if (selectedEmpId) {
-                          const emp = employees.find(e => e.id === selectedEmpId)
-                          if (emp) handleDropToDay(null, dIdx, emp)
-                        }
-                      }}
+              {/* Weekly/Daily Grid */}
+              <div className="flex-1 flex flex-col gap-4">
+
+                {/* View Toggles & Day Selector */}
+                <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center bg-white p-3 rounded-xl border border-gray-200 shadow-sm gap-4">
+                  <div className="flex bg-gray-100 p-1 rounded-lg">
+                    <button
+                      className={`px-4 py-2 text-sm font-bold rounded-md transition-colors ${scheduleViewMode === 'week' ? 'bg-white shadow-sm text-blue-700' : 'text-gray-500 hover:text-gray-700'}`}
+                      onClick={() => setScheduleViewMode('week')}
                     >
-                      <div className="bg-white border-b border-gray-200 p-3 text-center font-bold text-gray-700">
-                        {day}
-                      </div>
-                      <div className="p-3 flex-1 flex flex-col gap-2 min-h-[150px]">
-                        {daySchedules.map(sched => (
-                          <div key={sched.id} className="bg-white border text-left border-gray-200 rounded-lg p-3 shadow-sm group">
-                            <div className="font-bold text-sm text-gray-900 truncate mb-2">{sched.employees?.name}</div>
-                            <div className="flex items-center justify-between">
-                              <span className="text-xs font-mono text-gray-600 bg-gray-100 px-2 py-1 rounded">
-                                {sched.start_time.substring(0, 5)} - {sched.end_time.substring(0, 5)}
-                              </span>
-                            </div>
-                            <div className="mt-3 flex gap-2">
-                              {/* Edit & Delete directly inside the schedule card */}
-                              <Button size="sm" variant="outline" className="h-7 w-full text-xs" onClick={() => handleScheduleEdit(sched)}>
-                                <Edit2 className="w-3 h-3 mr-1" />
-                              </Button>
-                              <Button size="sm" variant="destructive" className="h-7 w-full text-xs" onClick={() => handleScheduleDelete(sched.id)}>
-                                <X className="w-3 h-3 mr-1" />
-                              </Button>
-                            </div>
+                      Неделя
+                    </button>
+                    <button
+                      className={`px-4 py-2 text-sm font-bold rounded-md transition-colors ${scheduleViewMode === 'day' ? 'bg-white shadow-sm text-blue-700' : 'text-gray-500 hover:text-gray-700'}`}
+                      onClick={() => setScheduleViewMode('day')}
+                    >
+                      День
+                    </button>
+                  </div>
+
+                  {scheduleViewMode === 'day' && (
+                    <div className="flex flex-wrap gap-1">
+                      {WEEKDAYS.map((day, idx) => (
+                        <button
+                          key={day}
+                          onClick={() => setSelectedDayIdx(idx)}
+                          className={`px-3 py-1.5 text-xs font-bold rounded-md transition-all ${selectedDayIdx === idx ? 'bg-blue-600 text-white shadow-md' : 'bg-gray-50 text-gray-600 hover:bg-gray-100 border border-gray-200'}`}
+                        >
+                          {day}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {scheduleViewMode === 'week' ? (
+                  <div className="grid grid-cols-1 md:grid-cols-3 xl:grid-cols-7 gap-3">
+                    {WEEKDAYS.map((day, dIdx) => {
+                      const daySchedules = schedules.filter(s => s.day_of_week === dIdx + 1)
+                      return (
+                        <div
+                          key={day}
+                          className={`bg-gray-50/50 border border-gray-200 rounded-xl flex flex-col overflow-hidden transition-colors cursor-pointer lg:cursor-default ${selectedEmpId ? 'ring-2 ring-blue-300 border-blue-400 bg-blue-50/50' : ''}`}
+                          onDragOver={e => { e.preventDefault(); e.currentTarget.classList.add('bg-blue-100') }}
+                          onDragLeave={e => e.currentTarget.classList.remove('bg-blue-100')}
+                          onDrop={e => { e.currentTarget.classList.remove('bg-blue-100'); handleDropToDay(e, dIdx) }}
+                          onClick={() => {
+                            if (selectedEmpId) {
+                              const emp = employees.find(e => e.id === selectedEmpId)
+                              if (emp) handleDropToDay(null, dIdx, emp)
+                            }
+                          }}
+                        >
+                          <div className="bg-white border-b border-gray-200 p-3 text-center font-bold text-gray-700">
+                            {day}
                           </div>
-                        ))}
-                        {daySchedules.length === 0 && (
-                          <div className="flex-1 flex items-center justify-center border-2 border-dashed border-gray-300 rounded-xl m-1">
-                            <span className="text-xs font-semibold text-gray-400 rotate-0 md:-rotate-90 xl:rotate-0 px-4 text-center">Перетащите сюда</span>
+                          <div className="p-3 flex-1 flex flex-col gap-2 min-h-[150px]">
+                            {daySchedules.map(sched => (
+                              <div key={sched.id} className="bg-white border text-left border-gray-200 rounded-lg p-3 shadow-sm group">
+                                <div className="font-bold text-sm text-gray-900 truncate mb-2">{sched.employees?.name}</div>
+                                <div className="flex items-center justify-between">
+                                  <span className="text-xs font-mono text-gray-600 bg-gray-100 px-2 py-1 rounded">
+                                    {sched.start_time.substring(0, 5)} - {sched.end_time.substring(0, 5)}
+                                  </span>
+                                </div>
+                                <div className="mt-3 flex gap-2">
+                                  {/* Edit & Delete directly inside the schedule card */}
+                                  <Button size="sm" variant="outline" className="h-7 w-full text-xs" onClick={() => handleScheduleEdit(sched)}>
+                                    <Edit2 className="w-3 h-3 mr-1" />
+                                  </Button>
+                                  <Button size="sm" variant="destructive" className="h-7 w-full text-xs" onClick={() => handleScheduleDelete(sched.id)}>
+                                    <X className="w-3 h-3 mr-1" />
+                                  </Button>
+                                </div>
+                              </div>
+                            ))}
+                            {daySchedules.length === 0 && (
+                              <div className="flex-1 flex items-center justify-center border-2 border-dashed border-gray-300 rounded-xl m-1">
+                                <span className="text-xs font-semibold text-gray-400 rotate-0 md:-rotate-90 xl:rotate-0 px-4 text-center">Перетащите сюда</span>
+                              </div>
+                            )}
                           </div>
-                        )}
+                        </div>
+                      )
+                    })}
+                  </div>
+                ) : (
+                  <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden flex-1">
+                    <div className="p-4 bg-gray-50 border-b border-gray-200 flex justify-between items-center">
+                      <h4 className="font-bold text-gray-800 text-lg">{WEEKDAYS[selectedDayIdx]} <span className="text-sm font-normal text-gray-500 ml-2">(Таймлайн)</span></h4>
+                      <p className="text-xs text-gray-500">Нажмите на полосу, чтобы изменить</p>
+                    </div>
+                    <div className="overflow-x-auto p-4">
+                      <div className="min-w-[800px]">
+                        {/* Timeline Header (hours) */}
+                        <div className="flex border-b border-gray-200 ml-32 pl-4">
+                          {Array.from({ length: 24 }).map((_, h) => (
+                            <div key={h} className="flex-1 text-[10px] font-bold text-gray-400 text-center py-2 border-l border-gray-100 relative">
+                              <span className="-translate-x-1/2 absolute left-0">{h}:00</span>
+                            </div>
+                          ))}
+                        </div>
+
+                        {/* Timeline Body */}
+                        <div className="mt-4 space-y-4">
+                          {schedules.filter(s => s.day_of_week === selectedDayIdx + 1).length === 0 ? (
+                            <div className="text-center py-10 text-gray-400 text-sm font-medium">Нет смен в этот день</div>
+                          ) : (
+                            schedules.filter(s => s.day_of_week === selectedDayIdx + 1).map(sched => {
+                              const [sH, sM] = sched.start_time.split(':').map(Number)
+                              const [eH, eM] = sched.end_time.split(':').map(Number)
+                              const start = sH + (sM / 60)
+                              let end = eH + (eM / 60)
+                              let duration = end - start
+
+                              let isOvernight = false
+                              if (duration < 0) {
+                                duration += 24
+                                isOvernight = true
+                              }
+
+                              const left = (start / 24) * 100
+                              const width = (duration / 24) * 100
+
+                              return (
+                                <div key={sched.id} className="flex items-center">
+                                  <div className="w-32 truncate text-sm font-bold text-gray-800 pr-2 pb-1">{sched.employees?.name}</div>
+                                  <div className="flex-1 relative h-12 bg-gray-50/50 rounded-lg border border-gray-100 flex items-center ml-4">
+                                    <div
+                                      className="absolute h-8 bg-blue-500 hover:bg-blue-600 active:bg-blue-700 transition-colors rounded shadow-sm flex items-center px-2 text-xs font-bold text-white cursor-pointer z-10 overflow-hidden"
+                                      style={{ left: `${left}%`, width: `${width}%` }}
+                                      onClick={() => handleScheduleEdit(sched)}
+                                      title={`${sched.start_time.substring(0, 5)} - ${sched.end_time.substring(0, 5)} (Нажмите для ред.)`}
+                                    >
+                                      <span className="truncate drop-shadow-sm">{sched.start_time.substring(0, 5)} - {sched.end_time.substring(0, 5)} {isOvernight && '(след.д)'}</span>
+                                    </div>
+                                    {/* Grid guides for rows */}
+                                    <div className="absolute inset-0 flex pointer-events-none">
+                                      {Array.from({ length: 24 }).map((_, h) => (
+                                        <div key={h} className="flex-1 border-l border-gray-100/50 h-full"></div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                </div>
+                              )
+                            })
+                          )}
+                        </div>
                       </div>
                     </div>
-                  )
-                })}
+                  </div>
+                )}
               </div>
 
             </div>
@@ -1137,50 +1274,88 @@ export default function AdminDashboard({
       {/* Finance Withdraw Modal */}
       {financeModalOpen && selectedFinanceEmp && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in">
-          <div className="bg-white rounded-2xl w-full max-w-md shadow-2xl p-6 border border-gray-100">
-            <div className="flex justify-between items-center mb-6">
+          <div className="bg-white rounded-2xl w-full max-w-md shadow-2xl p-6 border border-gray-100 flex flex-col max-h-[90vh]">
+            <div className="flex justify-between items-center mb-6 shrink-0">
               <h3 className="text-xl font-bold flex items-center gap-2"><Wallet className="text-blue-600" /> Снятие средств</h3>
               <Button size="icon" variant="ghost" className="h-8 w-8 text-gray-400 rounded-full" onClick={() => setFinanceModalOpen(false)}><X className="w-4 h-4" /></Button>
             </div>
 
-            <div className="bg-blue-50/50 rounded-xl p-4 border border-blue-100 mb-6">
-              <p className="text-sm text-blue-800 font-medium">Текущий депозит</p>
-              <h4 className="text-3xl font-extrabold text-blue-900 mt-1">{selectedFinanceEmp.balance?.toLocaleString('ru-RU')} ₸</h4>
-              <p className="text-sm text-blue-600/70 mt-1">{selectedFinanceEmp.name}</p>
-            </div>
+            <div className="overflow-y-auto pr-2">
+              <div className="bg-blue-50/50 rounded-xl p-4 border border-blue-100 mb-6 shrink-0">
+                <p className="text-sm text-blue-800 font-medium">Текущий депозит</p>
+                <h4 className="text-3xl font-extrabold text-blue-900 mt-1">{selectedFinanceEmp.balance?.toLocaleString('ru-RU')} ₸</h4>
+                <p className="text-sm text-blue-600/70 mt-1">{selectedFinanceEmp.name}</p>
+              </div>
 
-            <form onSubmit={handleWithdraw}>
-              <div className="space-y-2 mb-6">
-                <label className="text-sm font-bold text-gray-700">Сумма к выдаче</label>
-                <div className="relative">
-                  <Input type="number" required max={selectedFinanceEmp.balance} placeholder="Например, 5000" value={withdrawAmount} onChange={e => setWithdrawAmount(e.target.value)} className="pl-4 pr-12 h-14 text-lg font-semibold" autoFocus />
-                  <span className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-400 font-bold">₸</span>
+              <form onSubmit={handleWithdraw} className="shrink-0">
+                <div className="space-y-2 mb-6">
+                  <label className="text-sm font-bold text-gray-700">Сумма к выдаче</label>
+                  <div className="relative">
+                    <Input type="number" required max={selectedFinanceEmp.balance || 0} placeholder="Например, 5000" value={withdrawAmount} onChange={e => setWithdrawAmount(e.target.value)} className="pl-4 pr-12 h-14 text-lg font-semibold" autoFocus />
+                    <span className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-400 font-bold">₸</span>
+                  </div>
+                </div>
+
+                <div className="flex justify-end gap-3 pt-4 border-t border-gray-100">
+                  <Button type="button" variant="outline" className="h-11" onClick={() => setFinanceModalOpen(false)}>Отмена</Button>
+                  <Button type="submit" variant="success" className="h-11 shadow-sm"><Wallet className="w-4 h-4 mr-2" /> Снять</Button>
+                </div>
+              </form>
+
+              {/* Mini internal history */}
+              <div className="mt-8 shrink-0">
+                <h5 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">Последние операции (5)</h5>
+                <div className="space-y-2">
+                  {transactions.filter(t => t.employee_id === selectedFinanceEmp.id).slice(0, 5).map(tx => (
+                    <div key={tx.id} className="flex justify-between items-center text-sm py-2 border-b border-gray-50 last:border-0">
+                      <span className="text-gray-500 font-medium">{new Date(tx.timestamp).toLocaleDateString('ru')}</span>
+                      <span className={`font-bold ${tx.type === 'accrual' ? 'text-emerald-600' : 'text-rose-600'}`}>
+                        {tx.type === 'accrual' ? '+' : '-'}{tx.amount.toLocaleString()} ₸
+                      </span>
+                    </div>
+                  ))}
+                  {transactions.filter(t => t.employee_id === selectedFinanceEmp.id).length === 0 && (
+                    <p className="text-sm text-gray-400 text-center py-2">Нет записей</p>
+                  )}
                 </div>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
 
-              <div className="flex justify-end gap-3 pt-4 border-t border-gray-100">
-                <Button type="button" variant="outline" className="h-11" onClick={() => setFinanceModalOpen(false)}>Отмена</Button>
-                <Button type="submit" variant="success" className="h-11 shadow-sm"><HandCoins className="w-4 h-4 mr-2" /> Выдать</Button>
+      {/* Debt / Advance Modal */}
+      {debtModalOpen && debtEmp && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in">
+          <div className="bg-white rounded-2xl w-full max-w-md shadow-2xl p-6 border border-gray-100">
+            <div className="flex justify-between items-center mb-6">
+              <h3 className="text-xl font-bold flex items-center gap-2"><HandCoins className="text-rose-600" /> Начислить долг / аванс</h3>
+              <Button size="icon" variant="ghost" className="h-8 w-8 text-gray-400 rounded-full" onClick={() => setDebtModalOpen(false)}><X className="w-4 h-4" /></Button>
+            </div>
+
+            <div className="bg-rose-50/50 rounded-xl p-4 border border-rose-100 mb-6">
+              <p className="text-sm text-rose-800 font-medium">Сотрудник</p>
+              <h4 className="text-xl font-extrabold text-rose-900 mt-1">{debtEmp.name}</h4>
+              <p className="text-sm text-rose-600/70 mt-1">Текущий баланс: {debtEmp.balance?.toLocaleString('ru-RU')} ₸</p>
+            </div>
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-semibold text-gray-600 mb-2">Сумма (тг)</label>
+                <div className="relative">
+                  <span className="absolute inset-y-0 left-0 flex items-center pl-4 text-gray-400 font-bold">₸</span>
+                  <Input type="number" value={debtAmountInput} onChange={e => setDebtAmountInput(e.target.value)} className="pl-10 h-14 text-lg font-bold" placeholder="Например: 2000" />
+                </div>
+                <p className="text-xs text-gray-500 mt-1">* Эта сумма будет вычтена из депозита (баланса) сотрудника.</p>
               </div>
-            </form>
 
-            {/* Mini internal history could be here */}
-            <div className="mt-8">
-              <h5 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">Последние операции (5)</h5>
-              <div className="space-y-2">
-                {transactions.filter(t => t.employee_id === selectedFinanceEmp.id).slice(0, 5).map(tx => (
-                  <div key={tx.id} className="flex justify-between items-center text-sm py-2 border-b border-gray-50 last:border-0">
-                    <span className="text-gray-500 font-medium">{new Date(tx.timestamp).toLocaleDateString('ru')}</span>
-                    <span className={`font-bold ${tx.type === 'accrual' ? 'text-emerald-600' : 'text-rose-600'}`}>
-                      {tx.type === 'accrual' ? '+' : '-'}{tx.amount.toLocaleString()} ₸
-                    </span>
-                  </div>
-                ))}
-                {transactions.filter(t => t.employee_id === selectedFinanceEmp.id).length === 0 && (
-                  <p className="text-sm text-gray-400 text-center py-2">Нет записей</p>
-                )}
+              <div>
+                <label className="block text-sm font-semibold text-gray-600 mb-2">Комментарий</label>
+                <Input type="text" value={debtCommentInput} onChange={e => setDebtCommentInput(e.target.value)} className="h-14" placeholder="Например: Взял в долг на проезд" />
               </div>
             </div>
+
+            <Button className="w-full h-14 mt-6 text-lg font-bold bg-rose-600 hover:bg-rose-700 text-white" onClick={handleDebtSubmit}>Подтвердить долг/аванс</Button>
           </div>
         </div>
       )}
@@ -1227,7 +1402,7 @@ export default function AdminDashboard({
             </h3>
             <p className="font-semibold text-gray-700 mb-6 pb-4 border-b">Сотрудник: <span className="text-blue-600">{accrualEmp.name}</span></p>
 
-            <form onSubmit={handleManualAccrualSubmit} className="space-y-4">
+            <form onSubmit={handleAccrualSubmit} className="space-y-4">
               <div>
                 <label className="block text-sm font-bold text-gray-700">Сумма зачисления (₸)</label>
                 <div className="relative mt-2">

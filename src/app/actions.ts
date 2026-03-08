@@ -133,7 +133,102 @@ export async function markAttendance(
     .insert([{ employee_id: employeeId, type, ip_address: finalIp }])
 
   if (insErr) return { success: false, error: insErr.message }
+
+  // Phase 3: Auto-Salary computation on checkout
+  if (type === 'check_out') {
+    await computeStrictAutoSalary(employeeId, new Date())
+  }
+
   return { success: true, type }
+}
+
+async function computeStrictAutoSalary(employeeId: string, checkoutTime: Date) {
+  try {
+    // 1. Get the check_in time for today
+    const startOfDay = new Date(checkoutTime)
+    startOfDay.setHours(0, 0, 0, 0)
+
+    const { data: logs } = await supabase
+      .from('attendance_logs')
+      .select('type, timestamp')
+      .eq('employee_id', employeeId)
+      .gte('timestamp', startOfDay.toISOString())
+      .lte('timestamp', checkoutTime.toISOString())
+      .order('timestamp', { ascending: true })
+
+    if (!logs || logs.length === 0) return
+
+    // Find the matching check-in
+    let checkInTime: Date | null = null
+    for (let i = logs.length - 1; i >= 0; i--) {
+      if (logs[i].type === 'check_in') {
+        checkInTime = new Date(logs[i].timestamp)
+        break
+      }
+    }
+
+    if (!checkInTime) return // No check-in found for this check-out
+
+    // 2. Get today's schedule
+    const dayOfWeek = checkoutTime.getDay() || 7
+    const { data: sched } = await supabase
+      .from('schedules')
+      .select('start_time, end_time, shift_salary')
+      .eq('employee_id', employeeId)
+      .eq('day_of_week', dayOfWeek)
+      .single()
+
+    if (!sched || !sched.shift_salary) return
+
+    // 3. Parse schedule times
+    const [schedStartH, schedStartM] = sched.start_time.split(':').map(Number)
+    const [schedEndH, schedEndM] = sched.end_time.split(':').map(Number)
+
+    const plannedStart = new Date(checkInTime)
+    plannedStart.setHours(schedStartH, schedStartM, 0, 0)
+
+    const plannedEnd = new Date(checkoutTime)
+    plannedEnd.setHours(schedEndH, schedEndM, 0, 0)
+
+    // Handle overnight shifts in scheduled end time
+    if (schedEndH < schedStartH) {
+      plannedEnd.setDate(plannedEnd.getDate() + 1)
+    }
+
+    // 4. Validate Early/Late bounds
+    // Late limit: 30 mins
+    const maxLateTime = new Date(plannedStart.getTime() + 30 * 60000)
+    const isLate = checkInTime > maxLateTime
+
+    // Early leave limit: 1 hour
+    const maxEarlyLeave = new Date(plannedEnd.getTime() - 60 * 60000)
+    const isEarlyLeave = checkoutTime < maxEarlyLeave
+
+    if (!isLate && !isEarlyLeave) {
+      // Auto-accrue salary
+      await processShiftAccrual(employeeId, sched.shift_salary)
+    } else {
+      let penaltyComment = 'Штраф: '
+      if (isLate) penaltyComment += 'Опоздание. '
+      if (isEarlyLeave) penaltyComment += 'Ранний уход.'
+
+      // Auto-accrue with 50% penalty? According to requirements "fixed or percent penalty" can be set in settings.
+      // For now, let's accrue with a fixed 50% penalty if settings are absent, or simply do not accrue.
+      // The user requested a penalty. Let's retrieve penalty_rate from settings.
+      const penaltyRateStr = await getSetting('penalty_rate') // eg. "50" for 50%
+      const penaltyRate = penaltyRateStr ? Number(penaltyRateStr) : 50
+
+      if (penaltyRate > 0 && penaltyRate <= 100) {
+        const finalSalary = Math.floor(sched.shift_salary * ((100 - penaltyRate) / 100))
+        if (finalSalary > 0) {
+          // Add the transaction with comment about the penalty
+          await processShiftAccrual(employeeId, finalSalary, penaltyComment)
+        }
+      }
+    }
+  } catch (e) {
+    console.error("Auto Salary Error", e)
+  }
 }
 
 export async function manualMarkAttendance(
@@ -283,35 +378,79 @@ export async function getTransactions(employeeId?: string) {
   return data || []
 }
 
-export async function processShiftAccrual(employeeId: string, amount: number) {
-  if (amount <= 0) return { success: false, error: 'Сумма должна быть больше 0' }
+// === Transaction and Balance Actions ===
 
-  // 1. Get current balance
-  const { data: emp, error: empErr } = await supabase
-    .from('employees')
-    .select('balance')
-    .eq('id', employeeId)
-    .single()
+// internal helper
+export async function processShiftAccrual(employeeId: string, amount: number, commentStr: string = 'Отметки завершены успешно') {
+  try {
+    const { data: emp, error: empErr } = await supabase
+      .from('employees')
+      .select('balance, name')
+      .eq('id', employeeId)
+      .single()
 
-  if (empErr) return { success: false, error: empErr.message }
+    if (empErr) return { success: false, error: empErr.message }
 
-  // 2. Insert transaction
-  const { error: txErr } = await supabase
-    .from('transactions')
-    .insert([{ employee_id: employeeId, amount, type: 'accrual' }])
+    const newBalance = Number(emp.balance || 0) + Number(amount)
 
-  if (txErr) return { success: false, error: txErr.message }
+    const { error: updErr } = await supabase
+      .from('employees')
+      .update({ balance: newBalance })
+      .eq('id', employeeId)
 
-  // 3. Update balance
-  const newBalance = (Number(emp.balance) || 0) + Number(amount)
-  const { error: updErr } = await supabase
-    .from('employees')
-    .update({ balance: newBalance })
-    .eq('id', employeeId)
+    if (updErr) return { success: false, error: updErr.message }
 
-  if (updErr) return { success: false, error: updErr.message }
+    const { error: txErr } = await supabase
+      .from('transactions')
+      .insert({
+        employee_id: employeeId,
+        amount: amount,
+        type: 'accrual',
+        comment: commentStr
+      })
 
-  return { success: true, newBalance }
+    if (txErr) return { success: false, error: txErr.message }
+
+    return { success: true, newBalance }
+  } catch (e: any) {
+    return { success: false, error: e.message }
+  }
+}
+
+export async function processDebtOrAdvance(employeeId: string, amount: number, comment: string) {
+  try {
+    const { data: emp, error: empErr } = await supabase
+      .from('employees')
+      .select('balance')
+      .eq('id', employeeId)
+      .single()
+
+    if (empErr) return { success: false, error: empErr.message }
+
+    const newBalance = Number(emp.balance || 0) - Number(amount)
+
+    const { error: updErr } = await supabase
+      .from('employees')
+      .update({ balance: newBalance })
+      .eq('id', employeeId)
+
+    if (updErr) return { success: false, error: updErr.message }
+
+    const { error: txErr } = await supabase
+      .from('transactions')
+      .insert({
+        employee_id: employeeId,
+        amount: amount, // Positive amount stored, but type dictates subtraction
+        type: 'withdrawal',
+        comment: comment
+      })
+
+    if (txErr) return { success: false, error: txErr.message }
+
+    return { success: true, newBalance }
+  } catch (e: any) {
+    return { success: false, error: e.message }
+  }
 }
 
 export async function withdrawSalary(employeeId: string, amount: number) {
