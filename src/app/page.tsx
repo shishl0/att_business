@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import fpPromise from '@fingerprintjs/fingerprintjs'
-import { getEmployeeByDevice, getUnlinkedEmployees, linkDevice, getLastLogAction, markAttendance } from './actions'
+import { getEmployeeByDevice, getUnlinkedEmployees, linkDevice, getLastLogAction, markAttendance, isEarlyCheckout, getTodaySchedule } from './actions'
 import { Loader2, Fingerprint } from 'lucide-react'
 
 type Employee = { id: string, name: string, balance?: number }
@@ -26,15 +26,25 @@ export default function Home() {
   useEffect(() => {
     async function initClient() {
       try {
-        const fp = await fpPromise.load()
-        const result = await fp.get()
-        const fpId = result.visitorId
-        setFingerprint(fpId)
+        let deviceId = localStorage.getItem('attendance_device_id')
 
-        await fetchEmployeeState(fpId)
+        if (!deviceId) {
+          try {
+            const fp = await fpPromise.load()
+            const result = await fp.get()
+            deviceId = result.visitorId
+          } catch (fpErr) {
+            console.warn('FingerprintJS blocked or failed, using UUID fallback')
+            deviceId = crypto.randomUUID()
+          }
+          localStorage.setItem('attendance_device_id', deviceId)
+        }
+
+        setFingerprint(deviceId)
+        await fetchEmployeeState(deviceId)
       } catch (err) {
         console.error(err)
-        setErrorMsg('Ошибка получения Fingerprint устройства.')
+        setErrorMsg('Ошибка инициализации устройства.')
         setLoading(false)
       }
     }
@@ -49,20 +59,7 @@ export default function Home() {
       const action = await getLastLogAction(emp.id)
       setLastAction(action?.type || 'check_out')
 
-      // Fetch today's schedule to show salary
-      const supabase = (await import('@supabase/supabase-js')).createClient(
-        process.env.NEXT_PUBLIC_SUPABASE_URL!,
-        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-      )
-      const now = new Date()
-      const dayOfWeek = now.getDay() || 7
-      const { data: sched } = await supabase
-        .from('schedules')
-        .select('start_time, end_time, shift_salary')
-        .eq('employee_id', emp.id)
-        .eq('day_of_week', dayOfWeek)
-        .single()
-
+      const sched = await getTodaySchedule(emp.id)
       setTodaySchedule(sched)
     } else {
       const list = await getUnlinkedEmployees()
@@ -90,21 +87,10 @@ export default function Home() {
 
     const type = lastAction === 'check_in' ? 'check_out' : 'check_in'
 
-    if (type === 'check_out' && todaySchedule) {
-      const now = new Date()
-      const [schedEndH, schedEndM] = todaySchedule.end_time.split(':').map(Number)
-      const plannedEnd = new Date(now)
-      plannedEnd.setHours(schedEndH, schedEndM, 0, 0)
-
-      const [schedStartH] = todaySchedule.start_time.split(':').map(Number)
-      if (schedEndH < schedStartH && now.getHours() >= schedStartH) {
-        plannedEnd.setDate(plannedEnd.getDate() + 1)
-      }
-
-      const maxEarlyLeave = new Date(plannedEnd.getTime() - 60 * 60000)
-
-      if (now < maxEarlyLeave) {
-        const confirmMsg = `Смена заканчивается в ${todaySchedule.end_time}. Вы уверены, что хотите уйти сейчас? Может быть начислен штраф за ранний уход.`
+    if (type === 'check_out') {
+      const earlyCheck = await isEarlyCheckout(employee.id)
+      if (earlyCheck.isEarly) {
+        const confirmMsg = `Смена заканчивается в ${earlyCheck.endTime}. Вы уверены, что хотите уйти сейчас? (Будет зафиксирован ранний уход)`
         if (!window.confirm(confirmMsg)) {
           return
         }
@@ -112,18 +98,24 @@ export default function Home() {
     }
 
     setChecking(true)
+    setErrorMsg('')
 
-    const res = await markAttendance(employee.id, type)
-    if (res.success) {
-      setLastAction(type)
-      if (type === 'check_out') {
-        // Refetch to get updated balance
-        await fetchEmployeeState(fingerprint)
+    try {
+      const res = await markAttendance(employee.id, type)
+      if (res.success) {
+        setLastAction(type)
+        if (type === 'check_out') {
+          // Refetch to get updated balance
+          await fetchEmployeeState(fingerprint)
+        }
+      } else {
+        setErrorMsg(res.error || 'Ошибка записи: ' + res.error)
       }
-    } else {
-      setErrorMsg(res.error || 'Ошибка записи: ' + res.error)
+    } catch (e: any) {
+      setErrorMsg(e.message || 'Произошла непредвиденная ошибка')
+    } finally {
+      setChecking(false)
     }
-    setChecking(false)
   }
 
   if (loading) {
@@ -206,29 +198,55 @@ export default function Home() {
             </div>
           ) : (
             <div className="w-full flex flex-col items-center space-y-8 pb-4">
-              <div className="text-center bg-gray-50/80 px-8 py-4 rounded-3xl border border-gray-100 w-full shadow-sm">
+              <div className="text-center bg-gray-50/80 px-8 py-5 rounded-3xl border border-gray-100 w-full shadow-sm">
                 <p className="text-gray-400 text-xs font-semibold uppercase tracking-wider mb-1">Сотрудник</p>
-                <h2 className="text-2xl font-extrabold text-gray-900 leading-tight">
+                <h2 className="text-2xl font-extrabold text-gray-900 leading-tight mb-3">
                   {employee.name}
                 </h2>
+
+                <div className="flex items-center justify-between gap-4 pt-4 border-t border-gray-200/60 mt-2">
+                  <div className="text-center flex-1">
+                    <p className="text-[11px] text-gray-500 uppercase tracking-wider mb-0.5">Баланс</p>
+                    <p className={`text-base font-bold ${employee.balance && employee.balance < 0 ? 'text-red-600' : 'text-emerald-600'}`}>
+                      {employee.balance || 0} ₸
+                    </p>
+                  </div>
+                  {todaySchedule && (
+                    <>
+                      <div className="w-px h-8 bg-gray-200"></div>
+                      <div className="text-center flex-1">
+                        <p className="text-[11px] text-gray-500 uppercase tracking-wider mb-0.5">Ставка</p>
+                        <p className="text-base font-bold text-blue-600">{todaySchedule.shift_salary || 0} ₸</p>
+                      </div>
+                    </>
+                  )}
+                </div>
               </div>
 
               <button
                 onClick={handleAttendance}
                 disabled={checking}
                 style={{ WebkitTapHighlightColor: 'transparent' }}
-                className={`group relative w-[200px] h-[200px] rounded-full text-3xl font-black text-white shadow-2xl transition-all duration-300 transform hover:scale-[1.03] active:scale-[0.97] flex items-center justify-center outline-none select-none
-                  ${lastAction === 'check_in'
-                    ? 'bg-gradient-to-tr from-rose-500 via-red-500 to-red-600 shadow-rose-500/40 disabled:opacity-80'
-                    : 'bg-gradient-to-tr from-emerald-500 via-green-500 to-emerald-600 shadow-emerald-500/40 disabled:opacity-80'
-                  }`}
+                className={`group relative w-[200px] h-[200px] rounded-full text-3xl font-black text-white shadow-2xl transition-all duration-300 transform hover:scale-[1.03] active:scale-[0.97] flex items-center justify-center outline-none select-none overflow-hidden
+                  ${checking ? 'opacity-80 scale-[0.97]' : ''}`}
               >
-                <div className="absolute inset-2 rounded-full border-4 border-white/20 transition-transform group-hover:scale-105 group-active:scale-95 duration-300"></div>
-                {checking ? (
-                  <Loader2 className="w-12 h-12 animate-spin" />
-                ) : (
-                  isOnSite ? 'УШЕЛ' : 'ПРИШЕЛ'
-                )}
+                {/* Green background */}
+                <div className={`absolute inset-0 bg-gradient-to-tr from-emerald-500 via-green-500 to-emerald-600 transition-opacity duration-500 ease-in-out ${lastAction === 'check_out' || !lastAction ? 'opacity-100' : 'opacity-0'}`}></div>
+
+                {/* Red background */}
+                <div className={`absolute inset-0 bg-gradient-to-tr from-rose-500 via-red-500 to-red-600 transition-opacity duration-500 ease-in-out ${lastAction === 'check_in' ? 'opacity-100' : 'opacity-0'}`}></div>
+
+                {/* Inner ring */}
+                <div className="absolute inset-2 rounded-full border-4 border-white/20 transition-transform group-hover:scale-105 group-active:scale-95 duration-300 z-10 pointer-events-none"></div>
+
+                {/* Text / Spinner */}
+                <span className="relative z-20 flex items-center justify-center drop-shadow-md">
+                  {checking ? (
+                    <Loader2 className="w-12 h-12 animate-spin text-white" />
+                  ) : (
+                    isOnSite ? 'УШЕЛ' : 'ПРИШЕЛ'
+                  )}
+                </span>
               </button>
             </div>
           )}

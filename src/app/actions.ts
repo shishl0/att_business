@@ -32,12 +32,26 @@ export async function updateSetting(key: string, value: string) {
   }
 }
 
+export async function getAdminIpSubnet() {
+  const headersList = await headers()
+  const rawIp = headersList.get('x-forwarded-for') || headersList.get('x-real-ip') || '127.0.0.1'
+  let ip = rawIp.split(',')[0].trim()
+  if (ip.startsWith('::ffff:')) ip = ip.substring(7)
+
+  // Create subnet regex (first two octets)
+  const parts = ip.split('.')
+  if (parts.length === 4) {
+    return `^${parts[0]}\\.${parts[1]}\\..*`
+  }
+  return '.*'
+}
+
 // === Employee actions ===
 
 export async function getEmployeeByDevice(deviceId: string) {
   const { data } = await supabase
     .from('employees')
-    .select('id, name')
+    .select('id, name, balance')
     .eq('device_id', deviceId)
     .eq('is_active', true)
     .single()
@@ -48,7 +62,6 @@ export async function getUnlinkedEmployees() {
   const { data } = await supabase
     .from('employees')
     .select('id, name')
-    .is('device_id', null)
     .eq('is_active', true)
     .order('name')
   return data || []
@@ -63,6 +76,19 @@ export async function getLastLogAction(employeeId: string) {
     .limit(1)
     .single()
   return data
+}
+
+export async function getTodaySchedule(employeeId: string) {
+  const now = new Date()
+  const dayOfWeek = now.getDay() || 7
+  const { data: sched } = await supabase
+    .from('schedules')
+    .select('start_time, end_time, shift_salary')
+    .eq('employee_id', employeeId)
+    .eq('day_of_week', dayOfWeek)
+    .single()
+
+  return sched
 }
 
 export async function linkDevice(employeeId: string, deviceId: string) {
@@ -142,45 +168,97 @@ export async function markAttendance(
   return { success: true, type }
 }
 
-async function computeStrictAutoSalary(employeeId: string, checkoutTime: Date) {
+export async function isEarlyCheckout(employeeId: string) {
   try {
-    // 1. Get the check_in time for today
-    const startOfDay = new Date(checkoutTime)
-    startOfDay.setHours(0, 0, 0, 0)
-
     const { data: logs } = await supabase
       .from('attendance_logs')
       .select('type, timestamp')
       .eq('employee_id', employeeId)
-      .gte('timestamp', startOfDay.toISOString())
-      .lte('timestamp', checkoutTime.toISOString())
-      .order('timestamp', { ascending: true })
+      .order('timestamp', { ascending: false })
+      .limit(2)
 
-    if (!logs || logs.length === 0) return
+    if (!logs || logs.length === 0) return { isEarly: false }
+    if (logs[0].type !== 'check_in') return { isEarly: false } // Wait, if we are calling this it's right BEFORE checking out, so last log MUST be check_in
 
-    // Find the matching check-in
-    let checkInTime: Date | null = null
-    for (let i = logs.length - 1; i >= 0; i--) {
-      if (logs[i].type === 'check_in') {
-        checkInTime = new Date(logs[i].timestamp)
-        break
-      }
+    const checkInTime = new Date(logs[0].timestamp)
+    const now = new Date()
+
+    // Find schedule for the day of checkInTime
+    const checkInDay = checkInTime.getDay() || 7
+    const { data: sched } = await supabase
+      .from('schedules')
+      .select('start_time, end_time')
+      .eq('employee_id', employeeId)
+      .eq('day_of_week', checkInDay)
+      .single()
+
+    if (!sched) return { isEarly: false }
+
+    const [schedEndH, schedEndM] = sched.end_time.split(':').map(Number)
+    const [schedStartH] = sched.start_time.split(':').map(Number)
+
+    const plannedEnd = new Date(checkInTime)
+    plannedEnd.setHours(schedEndH, schedEndM, 0, 0)
+
+    if (schedEndH < schedStartH) {
+      plannedEnd.setDate(plannedEnd.getDate() + 1)
     }
 
-    if (!checkInTime) return // No check-in found for this check-out
+    const maxEarlyLeave = new Date(plannedEnd.getTime() - 60 * 60000)
 
-    // 2. Get today's schedule
-    const dayOfWeek = checkoutTime.getDay() || 7
+    // Also prevent absurd early leave (e.g. checking out 10 seconds after checking in)
+    if (now < maxEarlyLeave) {
+      return { isEarly: true, endTime: sched.end_time }
+    }
+
+    return { isEarly: false }
+  } catch (e) {
+    return { isEarly: false }
+  }
+}
+
+async function computeStrictAutoSalary(employeeId: string, checkoutTime: Date) {
+  try {
+    // 1. Grab the last two logs (must be [check_out, check_in] to be valid)
+    const { data: logs } = await supabase
+      .from('attendance_logs')
+      .select('id, type, timestamp')
+      .eq('employee_id', employeeId)
+      .order('timestamp', { ascending: false })
+      .limit(2)
+
+    if (!logs || logs.length < 2) return
+    if (logs[0].type !== 'check_out' || logs[1].type !== 'check_in') return // They spammed check_out or it's messed up
+
+    const checkOutLog = logs[0]
+    const checkInLog = logs[1]
+
+    const checkInTime = new Date(checkInLog.timestamp)
+
+    // 2. See if there's already an accrual for THIS specific checkInTime -> checkoutTime window
+    // We check if an accrual happened after the check_in
+    const { data: existingAccruals } = await supabase
+      .from('transactions')
+      .select('id')
+      .eq('employee_id', employeeId)
+      .eq('type', 'accrual')
+      .gte('timestamp', checkInLog.timestamp)
+      .limit(1)
+
+    if (existingAccruals && existingAccruals.length > 0) return // Already paid out for this shift
+
+    // 3. Find Schedule
+    const checkInDay = checkInTime.getDay() || 7
     const { data: sched } = await supabase
       .from('schedules')
       .select('start_time, end_time, shift_salary')
       .eq('employee_id', employeeId)
-      .eq('day_of_week', dayOfWeek)
+      .eq('day_of_week', checkInDay)
       .single()
 
     if (!sched || !sched.shift_salary) return
 
-    // 3. Parse schedule times
+    // Parse schedule times
     const [schedStartH, schedStartM] = sched.start_time.split(':').map(Number)
     const [schedEndH, schedEndM] = sched.end_time.split(':').map(Number)
 
@@ -190,42 +268,27 @@ async function computeStrictAutoSalary(employeeId: string, checkoutTime: Date) {
     const plannedEnd = new Date(checkoutTime)
     plannedEnd.setHours(schedEndH, schedEndM, 0, 0)
 
-    // Handle overnight shifts in scheduled end time
     if (schedEndH < schedStartH) {
       plannedEnd.setDate(plannedEnd.getDate() + 1)
     }
 
-    // 4. Validate Early/Late bounds
-    // Late limit: 30 mins
+    // Bounds check
     const maxLateTime = new Date(plannedStart.getTime() + 30 * 60000)
     const isLate = checkInTime > maxLateTime
 
-    // Early leave limit: 1 hour
     const maxEarlyLeave = new Date(plannedEnd.getTime() - 60 * 60000)
     const isEarlyLeave = checkoutTime < maxEarlyLeave
 
-    if (!isLate && !isEarlyLeave) {
-      // Auto-accrue salary
-      await processShiftAccrual(employeeId, sched.shift_salary)
-    } else {
-      let penaltyComment = 'Штраф: '
-      if (isLate) penaltyComment += 'Опоздание. '
-      if (isEarlyLeave) penaltyComment += 'Ранний уход.'
-
-      // Auto-accrue with 50% penalty? According to requirements "fixed or percent penalty" can be set in settings.
-      // For now, let's accrue with a fixed 50% penalty if settings are absent, or simply do not accrue.
-      // The user requested a penalty. Let's retrieve penalty_rate from settings.
-      const penaltyRateStr = await getSetting('penalty_rate') // eg. "50" for 50%
-      const penaltyRate = penaltyRateStr ? Number(penaltyRateStr) : 50
-
-      if (penaltyRate > 0 && penaltyRate <= 100) {
-        const finalSalary = Math.floor(sched.shift_salary * ((100 - penaltyRate) / 100))
-        if (finalSalary > 0) {
-          // Add the transaction with comment about the penalty
-          await processShiftAccrual(employeeId, finalSalary, penaltyComment)
-        }
-      }
+    let comment = 'Отработал смену'
+    if (isLate || isEarlyLeave) {
+      comment = 'Отметка о смене (со штрафным предупреждением): '
+      if (isLate) comment += 'Опоздание. '
+      if (isEarlyLeave) comment += 'Ранний уход.'
     }
+
+    // Always issue the full shift salary, just log warning if late/early
+    await processShiftAccrual(employeeId, sched.shift_salary, comment)
+
   } catch (e) {
     console.error("Auto Salary Error", e)
   }
@@ -471,7 +534,7 @@ export async function withdrawSalary(employeeId: string, amount: number) {
   // 2. Insert transaction
   const { error: txErr } = await supabase
     .from('transactions')
-    .insert([{ employee_id: employeeId, amount, type: 'withdrawal' }])
+    .insert([{ employee_id: employeeId, amount, type: 'withdrawal', comment: 'Снятие зарплаты' }])
 
   if (txErr) return { success: false, error: txErr.message }
 

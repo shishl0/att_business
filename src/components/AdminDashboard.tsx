@@ -5,7 +5,8 @@ import { useRouter, usePathname, useSearchParams } from 'next/navigation'
 import {
   addEmployee, resetDevice, updateEmployee, deleteEmployee, forceCheckOutAdmin,
   deleteAllLogs, addSchedule, updateSchedule, deleteSchedule, getAdminDashboardData,
-  manualMarkAttendance, processShiftAccrual, withdrawSalary, updateSetting, processDebtOrAdvance
+  manualMarkAttendance, processShiftAccrual, withdrawSalary, updateSetting, processDebtOrAdvance,
+  getAdminIpSubnet
 } from '@/app/actions'
 import * as XLSX from 'xlsx'
 import { Plus, Download, RefreshCw, SmartphoneNfc, Users, Clock, AlertTriangle, Edit2, Check, X, Trash2, CalendarCheck, ClockAlert, LogOut, Calendar as CalendarIcon, GripVertical, Wallet, Landmark, HandCoins, Settings } from 'lucide-react'
@@ -109,14 +110,18 @@ function createShift(inLog: Log | null, outLog: Log | null, schedulesForDay: Sch
     const firstSchedule = schedulesForDay.sort((a, b) => a.start_time.localeCompare(b.start_time))[0]
     const [schedHour, schedMin] = firstSchedule.start_time.split(':').map(Number)
 
-    // Convert inTime to local for comparison (roughly)
+    // Convert inTime to local for comparison
     const offsetMs = 5 * 60 * 60 * 1000
     const localInTime = new Date(inTime.getTime() + offsetMs)
     const inHour = localInTime.getUTCHours()
     const inMin = localInTime.getUTCMinutes()
 
-    if (inHour > schedHour || (inHour === schedHour && inMin > schedMin + 15)) {
-      is_late = true // late by more than 15 mins
+    const schedTotalMinutes = schedHour * 60 + schedMin
+    const inTotalMinutes = inHour * 60 + inMin
+
+    // Only mark as late if they checked in more than 15 minutes AFTER the scheduled start time
+    if (inTotalMinutes > schedTotalMinutes + 15) {
+      is_late = true
     }
   }
 
@@ -555,10 +560,10 @@ export default function AdminDashboard({
     e.preventDefault()
     if (!manualCheckEmp || !manualDatetime) return
 
-    // convert local datetime-local back to UTC string for DB
-    const localMs = new Date(manualDatetime).getTime()
-    const utcMs = localMs - (5 * 60 * 60 * 1000) // subtract GMT+5
-    const isoString = new Date(utcMs).toISOString()
+    // manualDatetime is like "2024-03-09T15:30"
+    // By appending "+05:00", we force JS to parse it as GMT+5 perfectly.
+    // .toISOString() then gives the correct UTC timestamp for the DB.
+    const isoString = new Date(`${manualDatetime}+05:00`).toISOString()
 
     const res = await manualMarkAttendance(manualCheckEmp.id, manualCheckType, isoString)
     if (res.success) {
@@ -610,7 +615,7 @@ export default function AdminDashboard({
   const openDebtModal = (emp: Employee) => {
     setDebtEmp(emp)
     setDebtAmountInput('')
-    setDebtCommentInput('Аванс / Долг')
+    setDebtCommentInput('Аванс')
     setDebtModalOpen(true)
   }
 
@@ -623,7 +628,7 @@ export default function AdminDashboard({
     }
     const res = await processDebtOrAdvance(debtEmp.id, amt, debtCommentInput)
     if (res.success) {
-      toast.success('Успешно начислен долг/аванс')
+      toast.success('Успешно начислен аванс')
       setDebtModalOpen(false)
       manualRefresh()
     } else {
@@ -937,7 +942,7 @@ export default function AdminDashboard({
                                   <Wallet className="w-3 h-3 mr-1" /> Снять
                                 </Button>
                                 <Button size="sm" variant="secondary" className="h-7 px-2 text-[11px] font-semibold bg-rose-50 text-rose-700 hover:bg-rose-100" onClick={() => openDebtModal(emp)} title="Аванс или долг">
-                                  <HandCoins className="w-3 h-3 mr-1" /> Долг
+                                  <HandCoins className="w-3 h-3 mr-1" /> Аванс
                                 </Button>
                               </div>
                             </div>
@@ -1225,8 +1230,22 @@ export default function AdminDashboard({
                       value={ipInput}
                       onChange={e => setIpInput(e.target.value)}
                       placeholder="Например: ^5\.76\.\d{1,3}\.\d{1,3}$"
-                      className="font-mono bg-white"
+                      className="font-mono bg-white flex-1"
                     />
+                    <Button
+                      onClick={async () => {
+                        setIsRefreshing(true)
+                        const subnet = await getAdminIpSubnet()
+                        setIpInput(subnet)
+                        setIsRefreshing(false)
+                        toast.success('Подсеть определена')
+                      }}
+                      variant="outline"
+                      className="flex-none bg-white text-blue-700 hover:text-blue-800 hover:bg-blue-50"
+                      disabled={isRefreshing}
+                    >
+                      Моя подсеть
+                    </Button>
                     <Button onClick={handleSaveSettings} disabled={isRefreshing} className="flex-none bg-blue-600 hover:bg-blue-700">
                       Сохранить
                     </Button>
@@ -1329,7 +1348,7 @@ export default function AdminDashboard({
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in">
           <div className="bg-white rounded-2xl w-full max-w-md shadow-2xl p-6 border border-gray-100">
             <div className="flex justify-between items-center mb-6">
-              <h3 className="text-xl font-bold flex items-center gap-2"><HandCoins className="text-rose-600" /> Начислить долг / аванс</h3>
+              <h3 className="text-xl font-bold flex items-center gap-2"><HandCoins className="text-rose-600" /> Начислить аванс</h3>
               <Button size="icon" variant="ghost" className="h-8 w-8 text-gray-400 rounded-full" onClick={() => setDebtModalOpen(false)}><X className="w-4 h-4" /></Button>
             </div>
 
@@ -1351,7 +1370,7 @@ export default function AdminDashboard({
 
               <div>
                 <label className="block text-sm font-semibold text-gray-600 mb-2">Комментарий</label>
-                <Input type="text" value={debtCommentInput} onChange={e => setDebtCommentInput(e.target.value)} className="h-14" placeholder="Например: Взял в долг на проезд" />
+                <Input type="text" value={debtCommentInput} onChange={e => setDebtCommentInput(e.target.value)} className="h-14" placeholder="Сумма Аванса" />
               </div>
             </div>
 

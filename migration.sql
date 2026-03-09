@@ -10,9 +10,13 @@ CREATE TABLE IF NOT EXISTS public.transactions (
     employee_id UUID REFERENCES public.employees(id) ON DELETE CASCADE,
     amount NUMERIC NOT NULL,
     type TEXT NOT NULL CHECK (type IN ('accrual', 'withdrawal')),
+    comment TEXT,
     timestamp TIMESTAMPTZ DEFAULT now(),
     created_at TIMESTAMPTZ DEFAULT now()
 );
+
+-- Если таблица уже была создана без поля comment, добавляем его:
+ALTER TABLE public.transactions ADD COLUMN IF NOT EXISTS comment TEXT;
 
 -- Обновляем RLS (если нужно)
 ALTER TABLE public.transactions ENABLE ROW LEVEL SECURITY;
