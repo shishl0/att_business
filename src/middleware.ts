@@ -8,7 +8,7 @@ export function middleware(request: NextRequest) {
   if (pathname.startsWith('/admin')) {
     const authHeader = request.headers.get('authorization')
     const adminPassword = process.env.ADMIN_PASSWORD
-    
+
     // We can use Basic Auth for simplicity
     if (authHeader) {
       const authValue = authHeader.split(' ')[1]
@@ -18,10 +18,10 @@ export function middleware(request: NextRequest) {
           const decoded = atob(authValue)
           const separatorIdx = decoded.indexOf(':')
           if (separatorIdx !== -1) {
-             const pwd = decoded.substring(separatorIdx + 1)
-             if (pwd === adminPassword) {
-               return NextResponse.next()
-             }
+            const pwd = decoded.substring(separatorIdx + 1)
+            if (pwd === adminPassword) {
+              return NextResponse.next()
+            }
           }
         } catch (e) {
           // Ignore decode errors
@@ -35,24 +35,6 @@ export function middleware(request: NextRequest) {
     })
   }
 
-  // IP restriction for root page
-  if (pathname === '/') {
-    const forwardedFor = request.headers.get('x-forwarded-for')
-    let clientIp = forwardedFor ? forwardedFor.split(',')[0].trim() : request.headers.get('x-real-ip') || 'unknown'
-
-    // For local development, allow all requests to ease testing
-    if (process.env.NODE_ENV === 'development') {
-      return NextResponse.next()
-    }
-
-    const allowedIp = process.env.NEXT_PUBLIC_ALLOWED_IP || '5.76.128.48'
-
-    if (clientIp !== allowedIp) {
-      return new NextResponse('Вы должны быть подключены к сети Doner Centr 5G', {
-        status: 403,
-      })
-    }
-  }
 
   return NextResponse.next()
 }
