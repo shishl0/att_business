@@ -19,7 +19,7 @@ CREATE TABLE public.attendance_logs (
     ip_address TEXT,
     created_at TIMESTAMPTZ DEFAULT now()
 );
-
+-- someNewPassIfThereIsNoHashing
 -- Устанавливаем политики Row Level Security (RLS) для защиты, хотя мы будем использовать service role в Server Actions
 ALTER TABLE public.employees ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.attendance_logs ENABLE ROW LEVEL SECURITY;

@@ -1,10 +1,19 @@
 'use client'
 
 import { useState, DragEvent } from 'react'
-import { GripVertical, Edit2, X } from 'lucide-react'
+import {
+    GripVertical, Edit2, Trash2, Plus, Calendar,
+    Clock, User, LayoutGrid, List, ChevronRight, Info, Users
+} from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Employee, Schedule } from '@/types'
 import { WEEKDAYS } from '@/lib/constants'
+import {
+    DropdownMenu,
+    DropdownMenuContent,
+    DropdownMenuItem,
+    DropdownMenuTrigger
+} from '@/components/ui/dropdown-menu'
 
 type ScheduleTabProps = {
     employees: Employee[]
@@ -36,191 +45,210 @@ export default function ScheduleTab({
         const emp = empOverride || draggedEmp
         if (!emp) return
         onDropToDay(emp, dayIndex)
+        if (!e) setSelectedEmpId(null)
     }
 
     return (
-        <div className="animate-in fade-in zoom-in-95 duration-200 flex flex-col lg:flex-row gap-6">
+        <div className="flex flex-col gap-6 animate-in fade-in zoom-in-95 duration-200">
 
-            {/* Draggable Employees List */}
-            <div className="w-full lg:w-64 bg-gray-50 border border-gray-200 rounded-xl p-4 shrink-0 flex flex-col max-h-[700px]">
-                <h3 className="font-bold text-gray-900 mb-4 pb-2 border-b border-gray-200 flex justify-between items-center">
-                    <span>Сотрудники</span>
-                    <GripVertical className="w-4 h-4 text-gray-400" />
-                </h3>
-                <div className="flex-1 overflow-y-auto space-y-3 pr-2">
-                    <p className="text-xs text-gray-500 mb-2 leading-relaxed">
-                        На десктопе: перетащите карточку. <br />
-                        На мобильном: нажмите на сотрудника, затем на день.
-                    </p>
-                    {employees.filter(e => e.is_active).map(emp => (
-                        <div
-                            key={emp.id}
-                            draggable
-                            onDragStart={(e) => handleDragStart(e, emp)}
-                            onClick={() => setSelectedEmpId(selectedEmpId === emp.id ? null : emp.id)}
-                            className={`bg-white border rounded-lg p-3 shadow-sm cursor-pointer lg:cursor-grab active:lg:cursor-grabbing transition-all flex items-center gap-3 ${selectedEmpId === emp.id ? 'border-blue-600 ring-2 ring-blue-100 bg-blue-50' : 'border-gray-200 hover:border-blue-400'
-                                }`}
-                        >
-                            <div className={`w-8 h-8 rounded-full flex items-center justify-center font-bold text-sm ${selectedEmpId === emp.id ? 'bg-blue-600 text-white' : 'bg-blue-100 text-blue-800'}`}>
-                                {emp.name.charAt(0)}
-                            </div>
-                            <span className={`font-semibold text-sm truncate ${selectedEmpId === emp.id ? 'text-blue-900' : 'text-gray-800'}`}>{emp.name}</span>
-                        </div>
-                    ))}
+            {/* ВЕРХНЯЯ ПАНЕЛЬ: Переключатели */}
+            <div className="flex flex-col sm:flex-row justify-between items-center gap-4 bg-white p-4 rounded-3xl border border-slate-200 shadow-sm">
+                <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 bg-indigo-50 rounded-xl flex items-center justify-center text-indigo-600">
+                        <Calendar className="w-5 h-5" />
+                    </div>
+                    <h2 className="text-lg font-bold text-slate-800">Расписание смен</h2>
+                </div>
+
+                <div className="flex p-1 bg-slate-100 rounded-xl w-full sm:w-auto">
+                    <button
+                        onClick={() => setScheduleViewMode('week')}
+                        className={`flex-1 sm:flex-none px-6 py-2 rounded-lg text-sm font-bold transition-all ${scheduleViewMode === 'week' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-500 hover:text-slate-700'}`}
+                    >
+                        Сетка
+                    </button>
+                    <button
+                        onClick={() => setScheduleViewMode('day')}
+                        className={`flex-1 sm:flex-none px-6 py-2 rounded-lg text-sm font-bold transition-all ${scheduleViewMode === 'day' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-500 hover:text-slate-700'}`}
+                    >
+                        Таймлайн
+                    </button>
                 </div>
             </div>
 
-            {/* Weekly/Daily Grid */}
-            <div className="flex-1 flex flex-col gap-4">
+            {/* ОСНОВНОЙ КОНТЕНТ: Сетка 1 : 3 */}
+            <div className="grid grid-cols-1 lg:grid-cols-[300px_1fr] gap-6 items-start">
 
-                {/* View Toggles & Day Selector */}
-                <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center bg-white p-3 rounded-xl border border-gray-200 shadow-sm gap-4">
-                    <div className="flex bg-gray-100 p-1 rounded-lg">
-                        <button
-                            className={`px-4 py-2 text-sm font-bold rounded-md transition-colors ${scheduleViewMode === 'week' ? 'bg-white shadow-sm text-blue-700' : 'text-gray-500 hover:text-gray-700'}`}
-                            onClick={() => setScheduleViewMode('week')}
-                        >
-                            Неделя
-                        </button>
-                        <button
-                            className={`px-4 py-2 text-sm font-bold rounded-md transition-colors ${scheduleViewMode === 'day' ? 'bg-white shadow-sm text-blue-700' : 'text-gray-500 hover:text-gray-700'}`}
-                            onClick={() => setScheduleViewMode('day')}
-                        >
-                            День
-                        </button>
+                {/* ЛЕВАЯ КОЛОНКА: Сотрудники */}
+                <aside className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden sticky top-6">
+                    <div className="p-5 border-b border-slate-50 bg-slate-50/50 flex justify-between items-center">
+                        <span className="font-bold text-slate-700 text-sm flex items-center gap-2">
+                            <Users className="w-4 h-4 text-slate-400" /> Команда
+                        </span>
                     </div>
 
-                    {scheduleViewMode === 'day' && (
-                        <div className="flex flex-wrap gap-1">
-                            {WEEKDAYS.map((day, idx) => (
-                                <button
-                                    key={day}
-                                    onClick={() => setSelectedDayIdx(idx)}
-                                    className={`px-3 py-1.5 text-xs font-bold rounded-md transition-all ${selectedDayIdx === idx ? 'bg-blue-600 text-white shadow-md' : 'bg-gray-50 text-gray-600 hover:bg-gray-100 border border-gray-200'}`}
-                                >
-                                    {day}
-                                </button>
-                            ))}
-                        </div>
-                    )}
-                </div>
+                    <div className="p-3 flex lg:flex-col gap-2 overflow-x-auto lg:overflow-y-auto max-h-[600px] no-scrollbar">
+                        {employees.filter(e => e.is_active).map(emp => (
+                            <div
+                                key={emp.id}
+                                draggable
+                                onDragStart={(e) => handleDragStart(e, emp)}
+                                onClick={() => setSelectedEmpId(selectedEmpId === emp.id ? null : emp.id)}
+                                className={`group flex items-center gap-3 p-3.5 rounded-2xl border transition-all cursor-grab active:cursor-grabbing shrink-0 min-w-[240px] lg:min-w-0 px-2 h-12 ${selectedEmpId === emp.id
+                                    ? 'bg-indigo-600 border-indigo-600 shadow-lg shadow-indigo-100'
+                                    : 'bg-white border-transparent hover:border-slate-200 hover:bg-slate-50'
+                                    }`}
+                            >
+                                <div className={`w-8 h-8 rounded-full flex items-center justify-center font-bold text-sm ${selectedEmpId === emp.id ? 'bg-blue-600 text-white' : 'bg-blue-100 text-blue-800'}`}>
+                                    {emp.name.charAt(0)}
+                                </div>
+                                <div className="flex-1 min-w-0">
+                                    <p className={`text-sm font-bold truncate ${selectedEmpId === emp.id ? 'text-white' : 'text-slate-700'}`}>{emp.name}</p>
+                                    <p className={`text-[10px] font-bold uppercase ${selectedEmpId === emp.id ? 'text-indigo-100/80' : 'text-slate-400'}`}>Сотрудник</p>
+                                </div>
+                                <ChevronRight className={`w-4 h-4 transition-transform lg:block hidden ${selectedEmpId === emp.id ? 'text-white translate-x-1' : 'text-slate-200 opacity-0 group-hover:opacity-100'}`} />
+                            </div>
+                        ))}
+                    </div>
+                </aside>
 
-                {scheduleViewMode === 'week' ? (
-                    <div className="grid grid-cols-1 md:grid-cols-3 xl:grid-cols-7 gap-3">
-                        {WEEKDAYS.map((day, dIdx) => {
-                            const daySchedules = schedules.filter(s => s.day_of_week === dIdx + 1)
-                            return (
-                                <div
-                                    key={day}
-                                    className={`bg-gray-50/50 border border-gray-200 rounded-xl flex flex-col overflow-hidden transition-colors cursor-pointer lg:cursor-default ${selectedEmpId ? 'ring-2 ring-blue-300 border-blue-400 bg-blue-50/50' : ''}`}
-                                    onDragOver={e => { e.preventDefault(); e.currentTarget.classList.add('bg-blue-100') }}
-                                    onDragLeave={e => e.currentTarget.classList.remove('bg-blue-100')}
-                                    onDrop={e => { e.currentTarget.classList.remove('bg-blue-100'); handleDropLocal(e, dIdx) }}
-                                    onClick={() => {
-                                        if (selectedEmpId) {
-                                            const emp = employees.find(e => e.id === selectedEmpId)
-                                            if (emp) handleDropLocal(null, dIdx, emp)
-                                        }
-                                    }}
-                                >
-                                    <div className="bg-white border-b border-gray-200 p-3 text-center font-bold text-gray-700">
-                                        {day}
+                {/* ПРАВАЯ КОЛОНКА: Сетка смен */}
+                <main className="min-w-0">
+                    {scheduleViewMode === 'week' ? (
+                        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                            {WEEKDAYS.map((day, dIdx) => {
+                                const daySchedules = schedules.filter(s => s.day_of_week === dIdx + 1)
+                                const isSelected = !!selectedEmpId;
+
+                                return (
+                                    <div
+                                        key={day}
+                                        onDragOver={e => { e.preventDefault(); e.currentTarget.classList.add('ring-4', 'ring-indigo-100', 'bg-indigo-50/50') }}
+                                        onDragLeave={e => e.currentTarget.classList.remove('ring-4', 'ring-indigo-100', 'bg-indigo-50/50')}
+                                        onDrop={e => { e.currentTarget.classList.remove('ring-4', 'ring-indigo-100', 'bg-indigo-50/50'); handleDropLocal(e, dIdx) }}
+                                        onClick={() => isSelected && handleDropLocal(null, dIdx, employees.find(e => e.id === selectedEmpId))}
+                                        className={`flex flex-col min-h-[320px] bg-white rounded-xl border transition-all duration-300 ${isSelected
+                                            ? 'border-indigo-400 border-dashed cursor-pointer bg-indigo-50/10'
+                                            : 'border-slate-200 shadow-sm hover:shadow-md'
+                                            }`}
+                                    >
+                                        <div className="p-5 flex justify-between items-center bg-slate-50/30 border-b border-slate-50 rounded-t-[2.5rem]">
+                                            <span className="font-black text-slate-800 uppercase tracking-widest text-[11px]">{day}</span>
+                                            <span className="bg-white px-2 py-0.5 rounded-lg text-[10px] font-bold text-indigo-500 border border-indigo-50">
+                                                {daySchedules.length}
+                                            </span>
+                                        </div>
+
+                                        <div className="p-4 space-y-3 flex-1 overflow-y-auto max-h-[400px]">
+                                            {daySchedules.map(sched => (
+                                                <div key={sched.id} className="group relative bg-white border border-slate-100 p-4 rounded-2xl transition-all shadow-sm hover:border-indigo-200">
+                                                    <div className="flex justify-between items-start mb-2">
+                                                        <span className="text-xs font-black text-slate-700 truncate block">{sched.employees?.name}</span>
+                                                        <button
+                                                            onClick={(e) => { e.stopPropagation(); onDeleteSchedule(sched.id) }}
+                                                            className="p-1.5 rounded-lg hover:bg-rose-50 text-slate-300 hover:text-rose-500 transition-colors"
+                                                        >
+                                                            <Trash2 className="w-3.5 h-3.5" />
+                                                        </button>
+                                                    </div>
+                                                    <div className="flex items-center gap-2">
+                                                        <div className="inline-flex items-center gap-1.5 bg-slate-50 text-slate-600 px-3 py-1.5 rounded-xl text-[10px] font-black border border-slate-100">
+                                                            <Clock className="w-3 h-3 text-indigo-500" />
+                                                            {sched.start_time.substring(0, 5)} — {sched.end_time.substring(0, 5)}
+                                                        </div>
+                                                        <button onClick={(e) => { e.stopPropagation(); onEditSchedule(sched) }} className="ml-auto opacity-0 group-hover:opacity-100 transition-opacity p-1.5 hover:bg-slate-100 rounded-lg">
+                                                            <Edit2 className="w-3.5 h-3.5 text-slate-400" />
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            ))}
+
+                                            {daySchedules.length === 0 && !isSelected && (
+                                                <div className="h-full flex flex-col items-center justify-center py-12 opacity-20 border-2 border-dashed border-slate-200 rounded-3xl">
+                                                    <Plus className="w-6 h-6 mb-1" />
+                                                    <p className="text-[10px] font-bold uppercase tracking-tighter">Пусто</p>
+                                                </div>
+                                            )}
+
+                                            {isSelected && (
+                                                <div className="h-full flex flex-col items-center justify-center border-2 border-dashed border-indigo-200 rounded-[2rem] py-12 bg-indigo-50/20">
+                                                    <Plus className="w-6 h-6 text-indigo-400 animate-bounce" />
+                                                    <p className="text-[10px] font-black text-indigo-500 uppercase mt-2">Добавить смену</p>
+                                                </div>
+                                            )}
+                                        </div>
                                     </div>
-                                    <div className="p-3 flex-1 flex flex-col gap-2 min-h-[150px]">
-                                        {daySchedules.map(sched => (
-                                            <div key={sched.id} className="bg-white border text-left border-gray-200 rounded-lg p-3 shadow-sm group">
-                                                <div className="font-bold text-sm text-gray-900 truncate mb-2">{sched.employees?.name}</div>
-                                                <div className="flex items-center justify-between">
-                                                    <span className="text-xs font-mono text-gray-600 bg-gray-100 px-2 py-1 rounded">
-                                                        {sched.start_time.substring(0, 5)} - {sched.end_time.substring(0, 5)}
-                                                    </span>
-                                                </div>
-                                                <div className="mt-3 flex gap-2">
-                                                    <Button size="sm" variant="outline" className="h-7 w-full text-xs" onClick={() => onEditSchedule(sched)}>
-                                                        <Edit2 className="w-3 h-3 mr-1" />
-                                                    </Button>
-                                                    <Button size="sm" variant="destructive" className="h-7 w-full text-xs" onClick={() => onDeleteSchedule(sched.id)}>
-                                                        <X className="w-3 h-3 mr-1" />
-                                                    </Button>
-                                                </div>
+                                )
+                            })}
+
+                            {/* Заполнители для сетки 3х3 (блок 8) */}
+                            <div className="hidden xl:flex flex-col bg-slate-100/50 rounded-xl border border-dashed border-slate-300 p-6 items-center justify-center text-center opacity-60">
+                                <Info className="w-8 h-8 text-slate-400 mb-2" />
+                                <p className="text-xs font-bold text-slate-500 uppercase">Статистика недели</p>
+                                <p className="text-[10px] text-slate-400 mt-1">Всего смен: {schedules.length}</p>
+                            </div>
+                        </div>
+                    ) : (
+                        <div className="bg-white rounded-[2.5rem] border border-slate-200 shadow-sm overflow-hidden flex flex-col">
+                            <div className="p-4 bg-slate-50/50 border-b border-slate-100 flex gap-2 overflow-x-auto no-scrollbar">
+                                {WEEKDAYS.map((day, idx) => (
+                                    <button
+                                        key={day}
+                                        onClick={() => setSelectedDayIdx(idx)}
+                                        className={`px-5 py-2 text-[11px] font-black uppercase rounded-xl transition-all whitespace-nowrap ${selectedDayIdx === idx
+                                            ? 'bg-indigo-600 text-white shadow-md'
+                                            : 'bg-white text-slate-400 hover:text-slate-600 border border-slate-100'}`}
+                                    >
+                                        {day}
+                                    </button>
+                                ))}
+                            </div>
+                            <div className="overflow-x-auto p-8 no-scrollbar">
+                                <div className="min-w-[1000px]">
+                                    {/* Часовая шкала */}
+                                    <div className="flex ml-40 border-b border-slate-100 pb-4 mb-6">
+                                        {Array.from({ length: 24 }).map((_, h) => (
+                                            <div key={h} className="flex-1 text-[10px] font-black text-slate-400 text-center relative border-l border-slate-50">
+                                                <span className="absolute -top-1 left-2">{h.toString().padStart(2, '0')}:00</span>
                                             </div>
                                         ))}
-                                        {daySchedules.length === 0 && (
-                                            <div className="flex-1 flex items-center justify-center border-2 border-dashed border-gray-300 rounded-xl m-1">
-                                                <span className="text-xs font-semibold text-gray-400 rotate-0 md:-rotate-90 xl:rotate-0 px-4 text-center">Перетащите сюда</span>
-                                            </div>
-                                        )}
                                     </div>
-                                </div>
-                            )
-                        })}
-                    </div>
-                ) : (
-                    <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden flex-1">
-                        <div className="p-4 bg-gray-50 border-b border-gray-200 flex justify-between items-center">
-                            <h4 className="font-bold text-gray-800 text-lg">{WEEKDAYS[selectedDayIdx]} <span className="text-sm font-normal text-gray-500 ml-2">(Таймлайн)</span></h4>
-                            <p className="text-xs text-gray-500">Нажмите на полосу, чтобы изменить</p>
-                        </div>
-                        <div className="overflow-x-auto p-4">
-                            <div className="min-w-[800px]">
-                                {/* Timeline Header (hours) */}
-                                <div className="flex border-b border-gray-200 ml-32 pl-4">
-                                    {Array.from({ length: 24 }).map((_, h) => (
-                                        <div key={h} className="flex-1 text-[10px] font-bold text-gray-400 text-center py-2 border-l border-gray-100 relative">
-                                            <span className="-translate-x-1/2 absolute left-0">{h}:00</span>
-                                        </div>
-                                    ))}
-                                </div>
-
-                                {/* Timeline Body */}
-                                <div className="mt-4 space-y-4">
-                                    {schedules.filter(s => s.day_of_week === selectedDayIdx + 1).length === 0 ? (
-                                        <div className="text-center py-10 text-gray-400 text-sm font-medium">Нет смен в этот день</div>
-                                    ) : (
-                                        schedules.filter(s => s.day_of_week === selectedDayIdx + 1).map(sched => {
+                                    <div className="space-y-4">
+                                        {schedules.filter(s => s.day_of_week === selectedDayIdx + 1).map(sched => {
                                             const [sH, sM] = sched.start_time.split(':').map(Number)
                                             const [eH, eM] = sched.end_time.split(':').map(Number)
                                             const start = sH + (sM / 60)
                                             let end = eH + (eM / 60)
-                                            let duration = end - start
-
-                                            let isOvernight = false
-                                            if (duration < 0) {
-                                                duration += 24
-                                                isOvernight = true
-                                            }
-
-                                            const left = (start / 24) * 100
-                                            const width = (duration / 24) * 100
-
+                                            if (end < start) end += 24
                                             return (
-                                                <div key={sched.id} className="flex items-center">
-                                                    <div className="w-32 truncate text-sm font-bold text-gray-800 pr-2 pb-1">{sched.employees?.name}</div>
-                                                    <div className="flex-1 relative h-12 bg-gray-50/50 rounded-lg border border-gray-100 flex items-center ml-4">
-                                                        <div
-                                                            className="absolute h-8 bg-blue-500 hover:bg-blue-600 active:bg-blue-700 transition-colors rounded shadow-sm flex items-center px-2 text-xs font-bold text-white cursor-pointer z-10 overflow-hidden"
-                                                            style={{ left: `${left}%`, width: `${width}%` }}
-                                                            onClick={() => onEditSchedule(sched)}
-                                                            title={`${sched.start_time.substring(0, 5)} - ${sched.end_time.substring(0, 5)} (Нажмите для ред.)`}
-                                                        >
-                                                            <span className="truncate drop-shadow-sm">{sched.start_time.substring(0, 5)} - {sched.end_time.substring(0, 5)} {isOvernight && '(след.д)'}</span>
+                                                <div key={sched.id} className="flex items-center group">
+                                                    <div className="w-40 shrink-0 flex items-center gap-3 pr-4">
+                                                        <div className="w-8 h-8 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center text-[10px] font-black uppercase shrink-0">
+                                                            {sched.employees?.name.charAt(0)}
                                                         </div>
-                                                        {/* Grid guides for rows */}
-                                                        <div className="absolute inset-0 flex pointer-events-none">
-                                                            {Array.from({ length: 24 }).map((_, h) => (
-                                                                <div key={h} className="flex-1 border-l border-gray-100/50 h-full"></div>
-                                                            ))}
+                                                        <span className="text-xs font-bold text-slate-700 truncate">{sched.employees?.name}</span>
+                                                    </div>
+                                                    <div className="flex-1 relative h-10 bg-slate-50 rounded-xl border border-slate-100 overflow-hidden">
+                                                        <div
+                                                            className="absolute h-6 top-2 bg-indigo-500 hover:bg-indigo-600 transition-all rounded-lg shadow-sm flex items-center px-3 text-[9px] font-black text-white cursor-pointer z-10 border border-white/20 whitespace-nowrap"
+                                                            style={{ left: `${(start / 24) * 100}%`, width: `${((end - start) / 24) * 100}%` }}
+                                                            onClick={() => onEditSchedule(sched)}
+                                                        >
+                                                            {sched.start_time.substring(0, 5)} - {sched.end_time.substring(0, 5)}
+                                                        </div>
+                                                        <div className="absolute inset-0 flex pointer-events-none opacity-30">
+                                                            {Array.from({ length: 24 }).map((_, h) => <div key={h} className="flex-1 border-l border-slate-200 h-full" />)}
                                                         </div>
                                                     </div>
                                                 </div>
                                             )
-                                        })
-                                    )}
+                                        })}
+                                    </div>
                                 </div>
                             </div>
                         </div>
-                    </div>
-                )}
+                    )}
+                </main>
             </div>
         </div>
     )
