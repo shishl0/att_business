@@ -1,5 +1,5 @@
 import AdminDashboard from '@/components/AdminDashboard'
-import { getAdminDashboardData } from '@/app/actions'
+import { getAdminDashboardData } from '@/actions/admin'
 
 export const dynamic = 'force-dynamic'
 
@@ -20,5 +20,7 @@ export default async function AdminPage(props: Props) {
     initialSchedules={data.schedules || []}
     initialTransactions={data.transactions || []}
     initialAllowedIps={data.allowed_ips || '.*'}
+    initialLateGraceMins={data.late_grace_mins || '15'}
+    initialLatePenaltyKzt={data.late_penalty_kzt || '1000'}
   />
 }

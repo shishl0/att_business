@@ -2,32 +2,49 @@
 
 import { useEffect, useState } from 'react'
 import fpPromise from '@fingerprintjs/fingerprintjs'
-import { getEmployeeByDevice, getUnlinkedEmployees, linkDevice, getLastLogAction, markAttendance, isEarlyCheckout, getTodaySchedule } from './actions'
+import { getEmployeeByDevice, getUnlinkedEmployees, linkDevice } from '@/actions/employees'
+import { getLastLogAction, markAttendance, isEarlyCheckout } from '@/actions/attendance'
+import { getTodaySchedule } from '@/actions/schedule'
+import { getTransactions } from '@/actions/finance'
 import { Loader2, Fingerprint } from 'lucide-react'
 
-type Employee = { id: string, name: string, balance?: number }
-type Schedule = { start_time: string, end_time: string, shift_salary: number }
+// Local types for Employee page (partial — match what the API returns)
+type Employee = { id: string; name: string; balance?: number; device_id?: string | null; is_active?: boolean; created_at?: string }
+type Schedule = { id?: string; employee_id?: string; day_of_week?: number; start_time: string; end_time: string; shift_salary: number }
+type Transaction = { id: string; amount: number; type: 'accrual' | 'withdrawal'; timestamp: string; comment?: string; source?: string }
+
+// Components
+import DeviceLinker from '@/components/employee/DeviceLinker'
+import StatusDisplay from '@/components/employee/StatusDisplay'
+import AttendanceControls from '@/components/employee/AttendanceControls'
+import TransactionHistoryModal from '@/components/employee/modals/TransactionHistoryModal'
+import EarlyLeaveModal from '@/components/employee/modals/EarlyLeaveModal'
 
 export default function Home() {
   const [fingerprint, setFingerprint] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [employee, setEmployee] = useState<Employee | null>(null)
   const [todaySchedule, setTodaySchedule] = useState<Schedule | null>(null)
+  const [transactions, setTransactions] = useState<Transaction[]>([])
 
+  // Modals
+  const [historyOpen, setHistoryOpen] = useState(false)
+  const [earlyLeaveModalOpen, setEarlyLeaveModalOpen] = useState(false)
+
+  // Linking state
   const [unlinked, setUnlinked] = useState<Employee[]>([])
   const [selectedEmployeeId, setSelectedEmployeeId] = useState('')
   const [linking, setLinking] = useState(false)
 
-  const [lastAction, setLastAction] = useState<'check_in' | 'check_out' | null>(null)
+  // Attendance state
+  const [lastAction, setLastAction] = useState<'check_in' | 'check_out' | 'break_start' | 'break_end' | null>(null)
   const [checking, setChecking] = useState(false)
-
   const [errorMsg, setErrorMsg] = useState('')
 
   useEffect(() => {
     async function initClient() {
       try {
         let deviceId = localStorage.getItem('attendance_device_id')
-
         if (!deviceId) {
           try {
             const fp = await fpPromise.load()
@@ -39,7 +56,6 @@ export default function Home() {
           }
           localStorage.setItem('attendance_device_id', deviceId)
         }
-
         setFingerprint(deviceId)
         await fetchEmployeeState(deviceId)
       } catch (err) {
@@ -48,7 +64,6 @@ export default function Home() {
         setLoading(false)
       }
     }
-
     initClient()
   }, [])
 
@@ -57,10 +72,13 @@ export default function Home() {
     if (emp) {
       setEmployee(emp)
       const action = await getLastLogAction(emp.id)
-      setLastAction(action?.type || 'check_out')
+      setLastAction(action?.type as any || 'check_out')
 
       const sched = await getTodaySchedule(emp.id)
       setTodaySchedule(sched)
+
+      const txs = await getTransactions(emp.id)
+      setTransactions(txs || [])
     } else {
       const list = await getUnlinkedEmployees()
       setUnlinked(list)
@@ -68,7 +86,8 @@ export default function Home() {
     setLoading(false)
   }
 
-  const isOnSite = lastAction === 'check_in'
+  const isOnSite = lastAction === 'check_in' || lastAction === 'break_end'
+  const isOnBreak = lastAction === 'break_start'
 
   async function handleLink() {
     if (!selectedEmployeeId || !fingerprint) return
@@ -84,29 +103,33 @@ export default function Home() {
 
   async function handleAttendance() {
     if (!employee || !fingerprint) return
-
-    const type = lastAction === 'check_in' ? 'check_out' : 'check_in'
+    const type = lastAction === 'check_in' || lastAction === 'break_end' ? 'check_out' : 'check_in'
 
     if (type === 'check_out') {
       const earlyCheck = await isEarlyCheckout(employee.id)
       if (earlyCheck.isEarly) {
-        const confirmMsg = `Смена заканчивается в ${earlyCheck.endTime}. Вы уверены, что хотите уйти сейчас? (Будет зафиксирован ранний уход)`
-        if (!window.confirm(confirmMsg)) {
-          return
-        }
+        setEarlyLeaveModalOpen(true)
+        return
       }
     }
+    await performAttendanceSubmit(type)
+  }
 
+  async function handleBreak(start: boolean) {
+    if (!employee) return
+    const type = start ? 'break_start' : 'break_end'
+    await performAttendanceSubmit(type)
+  }
+
+  async function performAttendanceSubmit(type: string, comment?: string) {
     setChecking(true)
     setErrorMsg('')
-
     try {
-      const res = await markAttendance(employee.id, type)
+      const res = await markAttendance(employee!.id, type, comment)
       if (res.success) {
-        setLastAction(type)
+        setLastAction(type as any)
         if (type === 'check_out') {
-          // Refetch to get updated balance
-          await fetchEmployeeState(fingerprint)
+          await fetchEmployeeState(fingerprint!)
         }
       } else {
         setErrorMsg(res.error || 'Ошибка записи: ' + res.error)
@@ -116,6 +139,11 @@ export default function Home() {
     } finally {
       setChecking(false)
     }
+  }
+
+  const handleEarlyLeaveSubmit = async (reason: string) => {
+    setEarlyLeaveModalOpen(false)
+    await performAttendanceSubmit('check_out', `Ранний уход: ${reason}`)
   }
 
   if (loading) {
@@ -129,12 +157,9 @@ export default function Home() {
 
   return (
     <main className="min-h-[100dvh] bg-blue-50/50 flex flex-col justify-center items-center py-8 px-4 relative overflow-hidden">
-
-      {/* Background decoration */}
       <div className="absolute top-[-10%] left-[-10%] w-[120%] h-[50%] bg-blue-600 rounded-b-[40%] shadow-lg -z-10"></div>
 
       <div className="w-full max-w-sm bg-white rounded-[32px] shadow-2xl overflow-hidden shadow-black/10 relative pb-10">
-
         <div className="flex flex-col items-center pt-8 pb-4 relative">
           <Fingerprint className="text-blue-100 w-24 h-24 absolute -top-8 -right-4 transform rotate-12 opacity-50 pointer-events-none" />
           <div className="z-10 text-center space-y-1">
@@ -151,107 +176,43 @@ export default function Home() {
           )}
 
           {!employee ? (
-            <div className="w-full space-y-5 flex flex-col items-center">
-              <div className="bg-orange-50/80 p-5 rounded-2xl w-full border border-orange-100/50">
-                <h2 className="text-[15px] font-bold text-orange-900 text-center mb-1.5 flex items-center justify-center gap-2">
-                  <Fingerprint className="w-4 h-4 text-orange-600" />
-                  Устройство не привязано
-                </h2>
-                <p className="text-[13px] text-orange-700/80 text-center leading-relaxed font-medium">
-                  Выберите себя из списка, чтобы закрепить телефон за вами.
-                </p>
-              </div>
-
-              {unlinked.length > 0 ? (
-                <div className="w-full space-y-4 pt-2">
-                  <div className="relative">
-                    <select
-                      className="w-full p-4 bg-gray-50/50 border border-gray-200 text-gray-900 font-medium text-sm rounded-2xl focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 outline-none transition-all appearance-none pr-10 hover:bg-gray-50 cursor-pointer shadow-sm"
-                      value={selectedEmployeeId}
-                      onChange={(e) => setSelectedEmployeeId(e.target.value)}
-                    >
-                      <option value="" disabled>Выберите свое имя...</option>
-                      {unlinked.map(u => (
-                        <option key={u.id} value={u.id}>{u.name}</option>
-                      ))}
-                    </select>
-                    <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-4 text-gray-500">
-                      <svg className="fill-current h-4 w-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path d="M9.293 12.95l.707.707L15.657 8l-1.414-1.414L10 10.828 5.757 6.586 4.343 8z" /></svg>
-                    </div>
-                  </div>
-
-                  <button
-                    onClick={handleLink}
-                    disabled={!selectedEmployeeId || linking}
-                    className="w-full py-4 bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white rounded-2xl font-bold shadow-xl shadow-blue-600/20 transition-all disabled:opacity-60 flex justify-center items-center h-[56px] disabled:hover:bg-blue-600"
-                  >
-                    {linking ? <Loader2 className="w-5 h-5 animate-spin" /> : 'Подтвердить привязку'}
-                  </button>
-                </div>
-              ) : (
-                <div className="p-5 bg-gray-50 border border-gray-100 rounded-2xl w-full">
-                  <p className="text-sm font-medium text-center text-gray-500">
-                    Нет доступных сотрудников. Обратитесь к администратору.
-                  </p>
-                </div>
-              )}
-            </div>
+            <DeviceLinker
+              unlinked={unlinked}
+              selectedEmployeeId={selectedEmployeeId}
+              setSelectedEmployeeId={setSelectedEmployeeId}
+              onLink={handleLink}
+              isLinking={linking}
+            />
           ) : (
-            <div className="w-full flex flex-col items-center space-y-8 pb-4">
-              <div className="text-center bg-gray-50/80 px-8 py-5 rounded-3xl border border-gray-100 w-full shadow-sm">
-                <p className="text-gray-400 text-xs font-semibold uppercase tracking-wider mb-1">Сотрудник</p>
-                <h2 className="text-2xl font-extrabold text-gray-900 leading-tight mb-3">
-                  {employee.name}
-                </h2>
+            <div className="w-full flex justify-center flex-col items-center">
+              <StatusDisplay employee={employee} todaySchedule={todaySchedule} />
 
-                <div className="flex items-center justify-between gap-4 pt-4 border-t border-gray-200/60 mt-2">
-                  <div className="text-center flex-1">
-                    <p className="text-[11px] text-gray-500 uppercase tracking-wider mb-0.5">Баланс</p>
-                    <p className={`text-base font-bold ${employee.balance && employee.balance < 0 ? 'text-red-600' : 'text-emerald-600'}`}>
-                      {employee.balance || 0} ₸
-                    </p>
-                  </div>
-                  {todaySchedule && (
-                    <>
-                      <div className="w-px h-8 bg-gray-200"></div>
-                      <div className="text-center flex-1">
-                        <p className="text-[11px] text-gray-500 uppercase tracking-wider mb-0.5">Ставка</p>
-                        <p className="text-base font-bold text-blue-600">{todaySchedule.shift_salary || 0} ₸</p>
-                      </div>
-                    </>
-                  )}
-                </div>
-              </div>
-
-              <button
-                onClick={handleAttendance}
-                disabled={checking}
-                style={{ WebkitTapHighlightColor: 'transparent' }}
-                className={`group relative w-[200px] h-[200px] rounded-full text-3xl font-black text-white shadow-2xl transition-all duration-300 transform hover:scale-[1.03] active:scale-[0.97] flex items-center justify-center outline-none select-none overflow-hidden
-                  ${checking ? 'opacity-80 scale-[0.97]' : ''}`}
-              >
-                {/* Green background */}
-                <div className={`absolute inset-0 bg-gradient-to-tr from-emerald-500 via-green-500 to-emerald-600 transition-opacity duration-500 ease-in-out ${lastAction === 'check_out' || !lastAction ? 'opacity-100' : 'opacity-0'}`}></div>
-
-                {/* Red background */}
-                <div className={`absolute inset-0 bg-gradient-to-tr from-rose-500 via-red-500 to-red-600 transition-opacity duration-500 ease-in-out ${lastAction === 'check_in' ? 'opacity-100' : 'opacity-0'}`}></div>
-
-                {/* Inner ring */}
-                <div className="absolute inset-2 rounded-full border-4 border-white/20 transition-transform group-hover:scale-105 group-active:scale-95 duration-300 z-10 pointer-events-none"></div>
-
-                {/* Text / Spinner */}
-                <span className="relative z-20 flex items-center justify-center drop-shadow-md">
-                  {checking ? (
-                    <Loader2 className="w-12 h-12 animate-spin text-white" />
-                  ) : (
-                    isOnSite ? 'УШЕЛ' : 'ПРИШЕЛ'
-                  )}
-                </span>
-              </button>
+              <AttendanceControls
+                isOnSite={isOnSite}
+                isOnBreak={isOnBreak}
+                lastAction={lastAction}
+                isChecking={checking}
+                onAttendanceMatch={handleAttendance}
+                onBreakMatch={handleBreak}
+                onOpenHistory={() => setHistoryOpen(true)}
+              />
             </div>
           )}
         </div>
       </div>
+
+      <TransactionHistoryModal
+        isOpen={historyOpen}
+        transactions={transactions}
+        onClose={() => setHistoryOpen(false)}
+      />
+
+      <EarlyLeaveModal
+        isOpen={earlyLeaveModalOpen}
+        isSubmitting={checking}
+        onClose={() => setEarlyLeaveModalOpen(false)}
+        onSubmit={handleEarlyLeaveSubmit}
+      />
     </main>
   )
 }
