@@ -49,4 +49,4 @@ export type Shift = {
     is_late: boolean
 }
 
-export type TabKey = 'employees' | 'schedule' | 'calendar' | 'logs' | 'finances' | 'settings'
+export type TabKey = 'employees' | 'schedule' | 'calendar' | 'logs' | 'finances' | 'settings' | 'statistics'

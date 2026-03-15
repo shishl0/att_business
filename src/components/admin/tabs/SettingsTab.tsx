@@ -38,7 +38,7 @@ export default function SettingsTab({
     }
 
     return (
-        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 max-w-2xl mx-auto">
+        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 animate-in fade-in zoom-in-95 duration-200">
             <h2 className="text-xl font-bold text-gray-800 mb-6 flex items-center gap-2">
                 <Settings className="w-5 h-5 text-gray-500" />
                 Настройки Системы

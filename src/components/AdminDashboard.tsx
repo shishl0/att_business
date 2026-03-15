@@ -3,7 +3,7 @@
 import { useState, useMemo, useEffect } from 'react'
 import { useRouter, usePathname, useSearchParams } from 'next/navigation'
 import * as XLSX from 'xlsx'
-import { LogOut, Users, CalendarIcon, CalendarCheck, Clock, Settings } from 'lucide-react'
+import { LogOut, Users, CalendarIcon, CalendarCheck, Clock, Settings, BarChart3 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { toast } from 'sonner'
 
@@ -27,6 +27,7 @@ import ScheduleTab from './admin/tabs/ScheduleTab'
 import CalendarTab from './admin/tabs/CalendarTab'
 import LogsTab from './admin/tabs/LogsTab'
 import SettingsTab from './admin/tabs/SettingsTab'
+import StatisticsTab from './admin/tabs/StatisticsTab'
 
 // Modals
 import ScheduleEditModal from './admin/modals/ScheduleEditModal'
@@ -59,7 +60,7 @@ export default function AdminDashboard({
   const pathname = usePathname()
   const searchParams = useSearchParams()
 
-  const defaultTab = ['employees', 'schedule', 'calendar', 'logs', 'settings'].includes(initialTab || '') ? initialTab : 'employees'
+  const defaultTab = ['employees', 'schedule', 'calendar', 'logs', 'settings', 'statistics'].includes(initialTab || '') ? initialTab : 'employees'
   const [activeTab, setActiveTabRaw] = useState<TabKey>((defaultTab as TabKey))
 
   const setActiveTab = (tab: TabKey) => {
@@ -454,6 +455,14 @@ export default function AdminDashboard({
               Логи
             </Button>
             <Button
+              variant={activeTab === 'statistics' ? 'default' : 'ghost'}
+              onClick={() => setActiveTab('statistics')}
+              className={`flex-none gap-2 px-4 md:px-6 shadow-none transition-all ${activeTab === 'statistics' ? 'bg-white text-blue-700 shadow-sm border-t border-l border-r border-gray-200 border-b-white translate-y-px rounded-b-none' : 'text-gray-500 hover:text-gray-900 bg-transparent rounded-b-none'}`}
+            >
+              <BarChart3 className="w-4 h-4" />
+              Статистика
+            </Button>
+            <Button
               variant={activeTab === 'settings' ? 'default' : 'ghost'}
               onClick={() => setActiveTab('settings')}
               className={`flex-none gap-2 px-4 md:px-6 shadow-none transition-all ${activeTab === 'settings' ? 'bg-white text-blue-700 shadow-sm border-t border-l border-r border-gray-200 border-b-white translate-y-px rounded-b-none' : 'text-gray-500 hover:text-gray-900 bg-transparent rounded-b-none'}`}
@@ -517,6 +526,14 @@ export default function AdminDashboard({
               currentLateGraceMins={lateGraceMins}
               currentLatePenalty={latePenaltyKzt}
               onSave={handleSaveSettings}
+            />
+          )}
+
+          {activeTab === 'statistics' && (
+            <StatisticsTab
+              employees={employees}
+              logs={logs}
+              transactions={transactions}
             />
           )}
 
