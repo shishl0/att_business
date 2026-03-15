@@ -156,51 +156,57 @@ export default function Home() {
   }
 
   return (
-    <main className="min-h-[100dvh] bg-blue-50/50 flex flex-col justify-center items-center py-8 px-4 relative overflow-hidden">
-      <div className="absolute top-[-10%] left-[-10%] w-[120%] h-[50%] bg-blue-600 rounded-b-[40%] shadow-lg -z-10"></div>
+    <main className="min-h-[100dvh] bg-[#fdfeff] flex flex-col justify-center items-center px-4 relative overflow-hidden">
+      <div className="w-full max-w-[380px] relative">
+        {errorMsg && (
+          <div className="absolute -top-12 left-0 right-0 animate-in slide-in-from-top-4 duration-300 z-50">
+            <div className="mx-4 p-3 bg-white/90 backdrop-blur-md border border-red-100 shadow-lg shadow-red-500/10 rounded-2xl flex items-center gap-3">
+              <div className="w-2 h-8 bg-red-500 rounded-full shrink-0" />
+              <p className="text-red-600 text-[13px] font-bold leading-tight">{errorMsg}</p>
+            </div>
+          </div>
+        )}
+        <div className="bg-white/80 backdrop-blur-2xl rounded-[48px] shadow-[0_32px_64px_-12px_rgba(0,0,0,0.08)] border border-white overflow-hidden relative">
+          <div className="px-6 pt-8 pb-10 space-y-8 flex flex-col items-center">
 
-      <div className="w-full max-w-sm bg-white rounded-[32px] shadow-2xl overflow-hidden shadow-black/10 relative pb-10">
-        <div className="flex flex-col items-center pt-8 pb-4 relative">
-          <Fingerprint className="text-blue-100 w-24 h-24 absolute -top-8 -right-4 transform rotate-12 opacity-50 pointer-events-none" />
-          <div className="z-10 text-center space-y-1">
-            <h1 className="text-2xl font-extrabold tracking-tight px-4 text-blue-900">Doner центральный</h1>
-            <p className="text-blue-500 text-sm font-semibold tracking-wide uppercase">Учет времени</p>
+            {!employee ? (
+              <div className="w-full animate-in fade-in zoom-in-95 duration-500">
+                <DeviceLinker
+                  unlinked={unlinked}
+                  selectedEmployeeId={selectedEmployeeId}
+                  setSelectedEmployeeId={setSelectedEmployeeId}
+                  onLink={handleLink}
+                  isLinking={linking}
+                />
+              </div>
+            ) : (
+              <div className="w-full flex flex-col items-center animate-in fade-in slide-in-from-bottom-4 duration-100">
+
+                {/* Секция статуса с небольшим отступом */}
+                <div className="mb-2 w-full">
+                  <StatusDisplay employee={employee} todaySchedule={todaySchedule} />
+                </div>
+
+                {/* Основные кнопки управления */}
+                <div className="relative z-10 w-full flex flex-col items-center">
+                  <AttendanceControls
+                    isOnSite={isOnSite}
+                    isOnBreak={isOnBreak}
+                    lastAction={lastAction}
+                    isChecking={checking}
+                    onAttendanceMatch={handleAttendance}
+                    onBreakMatch={handleBreak}
+                    onOpenHistory={() => setHistoryOpen(true)}
+                  />
+                </div>
+              </div>
+            )}
           </div>
         </div>
 
-        <div className="px-6 pt-4 space-y-6 flex flex-col items-center z-10 relative bg-white">
-          {errorMsg && (
-            <div className="w-full p-4 bg-red-50 text-red-600 rounded-2xl text-sm font-semibold text-center border border-red-100 shadow-sm shadow-red-100">
-              {errorMsg}
-            </div>
-          )}
-
-          {!employee ? (
-            <DeviceLinker
-              unlinked={unlinked}
-              selectedEmployeeId={selectedEmployeeId}
-              setSelectedEmployeeId={setSelectedEmployeeId}
-              onLink={handleLink}
-              isLinking={linking}
-            />
-          ) : (
-            <div className="w-full flex justify-center flex-col items-center">
-              <StatusDisplay employee={employee} todaySchedule={todaySchedule} />
-
-              <AttendanceControls
-                isOnSite={isOnSite}
-                isOnBreak={isOnBreak}
-                lastAction={lastAction}
-                isChecking={checking}
-                onAttendanceMatch={handleAttendance}
-                onBreakMatch={handleBreak}
-                onOpenHistory={() => setHistoryOpen(true)}
-              />
-            </div>
-          )}
-        </div>
       </div>
 
+      {/* Модалки */}
       <TransactionHistoryModal
         isOpen={historyOpen}
         transactions={transactions}

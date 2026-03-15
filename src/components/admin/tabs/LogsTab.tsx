@@ -75,6 +75,15 @@ export default function LogsTab({
         setIsAutoClosing(false)
     }
 
+    const isLatestCheckIn = (currentLog: Log) => {
+        if (currentLog.type !== 'check_in') return false;
+        const employeeLogs = logs.filter(l => l.employee_id === currentLog.employee_id);
+        const latestLog = employeeLogs.reduce((prev, current) => {
+            return new Date(prev.timestamp) > new Date(current.timestamp) ? prev : current;
+        });
+        return latestLog.id === currentLog.id;
+    };
+
     return (
         <div className="space-y-6 animate-in fade-in zoom-in-95 duration-200">
             <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-6">
@@ -147,8 +156,14 @@ export default function LogsTab({
                                             </>
                                         ) : (
                                             <>
-                                                {log.type === 'check_in' && (
-                                                    <Button size="sm" variant="outline" className="h-7 px-2 text-rose-600 border-rose-200 hover:bg-rose-50" onClick={() => onForceCheckOut(log.employee_id, log.employees?.name || '')} disabled={loadingId === log.id}>
+                                                {isLatestCheckIn(log) && (
+                                                    <Button
+                                                        size="sm"
+                                                        variant="outline"
+                                                        className="h-7 px-2 text-rose-600 border-rose-200 hover:bg-rose-50"
+                                                        onClick={() => onForceCheckOut(log.employee_id, log.employees?.name || '')}
+                                                        disabled={loadingId === log.id}
+                                                    >
                                                         Закрыть
                                                     </Button>
                                                 )}
