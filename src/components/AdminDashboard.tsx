@@ -471,6 +471,7 @@ export default function AdminDashboard({
           {activeTab === 'employees' && (
             <EmployeesTab
               employees={employees}
+              logs={logs}
               transactions={transactions}
               isEmployeeCheckedIn={isEmployeeCheckedIn}
               onAddEmployee={handleCreateEmployee}
